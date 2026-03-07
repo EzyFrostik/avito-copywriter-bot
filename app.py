@@ -16,10 +16,10 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
 
-# Токен Hugging Face из переменных окружения
-HF_TOKEN = os.environ.get("HF_TOKEN")
-if not HF_TOKEN:
-    raise ValueError("HF_TOKEN не задан в переменных окружения")
+# Ключ OpenRouter из переменных окружения
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY не задан в переменных окружения")
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -76,7 +76,7 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
-# ---------- Генерация через YandexGPT (с заголовком X-Use-Tasks) ----------
+# ---------- Генерация через OpenRouter ----------
 async def generate_with_ai(user_data, user_text):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
@@ -86,46 +86,51 @@ async def generate_with_ai(user_data, user_text):
     logger.info(f"=== НАЧАЛО ГЕНЕРАЦИИ ===")
     logger.info(f"Товар: {product}, Ниша: {niche}, Аудитория: {audience}")
     
-    # Формируем промпт в формате, который понимает YandexGPT
-    prompt = f"""Ты профессиональный копирайтер для Авито. Создай продающее объявление.
+    # Системный промпт (роль)
+    system_prompt = """Ты профессиональный копирайтер для Авито. Твоя задача — создавать продающие объявления на русском языке.
+Объявление должно быть структурированным и убедительным. Используй эмодзи для наглядности."""
+    
+    # Пользовательский промпт (вводные)
+    user_prompt = f"""Создай продающее объявление для Авито.
 
 НИША: {niche}
 ТОВАР/УСЛУГА: {product}
 ЦЕЛЕВАЯ АУДИТОРИЯ: {audience}
 ПРЕИМУЩЕСТВА: {advantages}
-ОПИСАНИЕ ПРОДАВЦА: {user_text}
+ДОПОЛНИТЕЛЬНО ОТ ПРОДАВЦА: {user_text}
 
 ТРЕБОВАНИЯ К ОБЪЯВЛЕНИЮ:
-1. Заголовок должен отражать главную потребность клиента
-2. В описании используй живые формулировки
-3. Добавь эмодзи для структуры (✅, ⭐️, ☑️)
-4. В конце добавь призыв к действию
-5. Фраза "Добавьте в избранное" в конце
+1. Заголовок (цепляющий, с ключевыми словами)
+2. Краткое вступление (1-2 предложения)
+3. Список того, что предлагаете (с эмодзи ✅)
+4. Почему выбирают вас (с эмодзи ⭐️) — минимум 3 пункта
+5. Призыв к действию
+6. Фраза "Добавьте в избранное" в конце
 
-Используй живые формулировки, как в разговоре с клиентом.
-
-Ассистент:[SEP]"""
+Используй живые формулировки, как в разговоре с клиентом."""
     
     try:
-        API_URL = "https://api-inference.huggingface.co/models/yandex/YandexGPT-5-Lite-8B-instruct"
+        # Эндпоинт OpenRouter
+        API_URL = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {HF_TOKEN}",
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
-            "X-Use-Tasks": "text-generation"  # Критически важный заголовок!
+            "HTTP-Referer": "https://t.me/avito_copywriter_bot",
+            "X-Title": "Avito Copywriter Bot"
         }
         
+        # Используем бесплатную модель
         payload = {
-            "inputs": prompt,
-            "parameters": {
-                "max_new_tokens": 2500,
-                "temperature": 0.5,
-                "top_p": 0.9,
-                "do_sample": True,
-                "return_full_text": False
-            }
+            "model": "gryphe/mythomax-l2-13b:free",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": 2500,
+            "temperature": 0.7
         }
         
-        logger.info("Отправляю запрос к Hugging Face Inference API...")
+        logger.info("Отправляю запрос к OpenRouter...")
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None, 
@@ -134,24 +139,13 @@ async def generate_with_ai(user_data, user_text):
         
         if response.status_code == 200:
             result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                final_text = result[0].get('generated_text', '')
-                final_text = final_text.replace('</s>', '').strip()
-                logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
-                return final_text
-            else:
-                logger.error(f"Странный ответ API: {result}")
-                return generate_template_text(user_data, user_text)
-        elif response.status_code == 401:
-            logger.error("❌ Ошибка авторизации. Токен недействителен.")
-            return "❌ Ошибка авторизации нейросети. Проверьте токен Hugging Face."
+            final_text = result['choices'][0]['message']['content']
+            logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
+            return final_text
         else:
-            logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
+            logger.error(f"❌ Ошибка OpenRouter: {response.status_code} - {response.text}")
             return generate_template_text(user_data, user_text)
         
-    except requests.exceptions.Timeout:
-        logger.error("Таймаут при запросе к API")
-        return generate_template_text(user_data, user_text)
     except Exception as e:
         logger.error(f"❌ ОШИБКА ПРИ ГЕНЕРАЦИИ: {e}")
         return generate_template_text(user_data, user_text)
@@ -210,7 +204,7 @@ def generate_template_text(data, user_text):
 async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(
         "👋 Привет! Я помогу создать продающее объявление для Авито.\n\n"
-        "📝 Я задам несколько вопросов, а потом сгенерирую текст с помощью нейросети YandexGPT.\n\n"
+        "📝 Я задам несколько вопросов, а потом сгенерирую текст с помощью нейросети (OpenRouter).\n\n"
         "Какая у вас ниша? (например: стройматериалы, сантехника, услуги)"
     )
     await state.set_state(Form.waiting_for_niche)
@@ -252,9 +246,8 @@ async def process_input_text(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_text = message.text
     
-    await message.answer("⏳ Генерирую объявление с помощью YandexGPT... (может занять до 1 минуты)")
+    await message.answer("⏳ Генерирую объявление с помощью нейросети... (может занять до 30 секунд)")
     
-    # Используем нейросеть с правильным эндпоинтом и заголовком
     result = await generate_with_ai(user_data, user_text)
     
     category = user_data.get('niche', 'разное')
@@ -301,14 +294,13 @@ async def run_web_server():
 
 # ---------- Запуск ----------
 async def main():
-    # Принудительно сбрасываем все вебхуки
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён")
     
     init_db()
     asyncio.create_task(run_web_server())
     
-    logger.info("Бот запущен и готов к работе с YandexGPT!")
+    logger.info("Бот запущен и готов к работе с OpenRouter!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

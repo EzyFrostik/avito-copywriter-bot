@@ -76,7 +76,7 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
-# ---------- Генерация через YandexGPT (правильный эндпоинт) ----------
+# ---------- Генерация через YandexGPT (с заголовком X-Use-Tasks) ----------
 async def generate_with_ai(user_data, user_text):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
@@ -107,11 +107,11 @@ async def generate_with_ai(user_data, user_text):
 Ассистент:[SEP]"""
     
     try:
-        # Используем текстовый эндпоинт, а не чат-комплишнс
         API_URL = "https://api-inference.huggingface.co/models/yandex/YandexGPT-5-Lite-8B-instruct"
         headers = {
             "Authorization": f"Bearer {HF_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "X-Use-Tasks": "text-generation"  # Критически важный заголовок!
         }
         
         payload = {
@@ -134,16 +134,17 @@ async def generate_with_ai(user_data, user_text):
         
         if response.status_code == 200:
             result = response.json()
-            # API возвращает список, первый элемент — сгенерированный текст
             if isinstance(result, list) and len(result) > 0:
                 final_text = result[0].get('generated_text', '')
-                # Убираем возможные артефакты
                 final_text = final_text.replace('</s>', '').strip()
                 logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
                 return final_text
             else:
                 logger.error(f"Странный ответ API: {result}")
                 return generate_template_text(user_data, user_text)
+        elif response.status_code == 401:
+            logger.error("❌ Ошибка авторизации. Токен недействителен.")
+            return "❌ Ошибка авторизации нейросети. Проверьте токен Hugging Face."
         else:
             logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
             return generate_template_text(user_data, user_text)
@@ -253,7 +254,7 @@ async def process_input_text(message: types.Message, state: FSMContext):
     
     await message.answer("⏳ Генерирую объявление с помощью YandexGPT... (может занять до 1 минуты)")
     
-    # Используем нейросеть с правильным эндпоинтом
+    # Используем нейросеть с правильным эндпоинтом и заголовком
     result = await generate_with_ai(user_data, user_text)
     
     category = user_data.get('niche', 'разное')

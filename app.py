@@ -70,47 +70,53 @@ def get_user_history(user_id):
 
 # ---------- Машина состояний ----------
 class Form(StatesGroup):
-    waiting_for_niche = State()
-    waiting_for_product = State()
-    waiting_for_audience = State()
-    waiting_for_advantages = State()
-    waiting_for_input_text = State()
+    waiting_for_url = State()           # Шаг 1: ссылка на объявление
+    waiting_for_niche = State()          # Шаг 2: ниша
+    waiting_for_product = State()        # Шаг 3: товар
+    waiting_for_audience = State()       # Шаг 4: аудитория
+    waiting_for_advantages = State()     # Шаг 5: преимущества
 
-# ---------- Генерация через OpenRouter ----------
-async def generate_with_ai(user_data, user_text):
+# ---------- Генерация с анализом объявления ----------
+async def analyze_and_generate(url, user_data):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
     audience = user_data.get('audience', 'клиенты')
     advantages = user_data.get('advantages', '')
     
-    logger.info(f"=== НАЧАЛО ГЕНЕРАЦИИ ===")
-    logger.info(f"Товар: {product}, Ниша: {niche}, Аудитория: {audience}")
+    logger.info(f"=== АНАЛИЗ ОБЪЯВЛЕНИЯ ===")
+    logger.info(f"URL: {url}")
     
-    # Системный промпт (роль)
-    system_prompt = """Ты профессиональный копирайтер для Авито. Твоя задача — создавать продающие объявления на русском языке.
-Объявление должно быть структурированным и убедительным. Используй эмодзи для наглядности."""
+    # ШАГ 1: Анализ объявления
+    analysis_prompt = f"""Ты профессиональный маркетолог и копирайтер. Проанализируй объявление по ссылке: {url}
+
+Напиши краткий анализ по пунктам:
+1. Сильные стороны объявления
+2. Слабые стороны (что можно улучшить)
+3. Что отсутствует (цена, доставка, гарантии и т.д.)
+4. Насколько заголовок цепляет
+5. Общая оценка от 1 до 10"""
     
-    # Пользовательский промпт (вводные)
-    user_prompt = f"""Создай продающее объявление для Авито.
+    # ШАГ 2: Генерация нового объявления
+    generation_prompt = f"""На основе анализа создай новое, улучшенное объявление для Авито.
 
-НИША: {niche}
-ТОВАР/УСЛУГА: {product}
-ЦЕЛЕВАЯ АУДИТОРИЯ: {audience}
-ПРЕИМУЩЕСТВА: {advantages}
-ДОПОЛНИТЕЛЬНО ОТ ПРОДАВЦА: {user_text}
+ИСХОДНЫЕ ДАННЫЕ:
+- Ниша: {niche}
+- Товар/услуга: {product}
+- Целевая аудитория: {audience}
+- Преимущества: {advantages}
 
-ТРЕБОВАНИЯ К ОБЪЯВЛЕНИЮ:
+ТРЕБОВАНИЯ К НОВОМУ ОБЪЯВЛЕНИЮ:
 1. Заголовок (цепляющий, с ключевыми словами)
 2. Краткое вступление (1-2 предложения)
-3. Список того, что предлагаете (с эмодзи ✅)
+3. Список того, что предлагаете (с эмодзи ✅) — минимум 5 пунктов
 4. Почему выбирают вас (с эмодзи ⭐️) — минимум 3 пункта
-5. Призыв к действию
-6. Фраза "Добавьте в избранное" в конце
+5. Цена и условия доставки (если есть)
+6. Призыв к действию
+7. Фраза "Добавьте в избранное" в конце
 
-Используй живые формулировки, как в разговоре с клиентом."""
+Используй лучшие практики из анализа, исправь слабые места."""
     
     try:
-        # Эндпоинт OpenRouter
         API_URL = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -118,140 +124,123 @@ async def generate_with_ai(user_data, user_text):
             "HTTP-Referer": "https://t.me/avito_copywriter_bot",
             "X-Title": "Avito Copywriter Bot"
         }
+        loop = asyncio.get_event_loop()
         
-        # Используем бесплатную модель
-        payload = {
+        # Получаем анализ
+        logger.info("Анализирую объявление...")
+        payload1 = {
             "model": "gryphe/mythomax-l2-13b:free",
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "system", "content": "Ты профессиональный маркетолог и копирайтер."},
+                {"role": "user", "content": analysis_prompt}
             ],
-            "max_tokens": 2500,
+            "max_tokens": 800,
+            "temperature": 0.5
+        }
+        response1 = await loop.run_in_executor(
+            None, 
+            lambda: requests.post(API_URL, headers=headers, json=payload1, timeout=30)
+        )
+        
+        if response1.status_code != 200:
+            raise Exception(f"Анализ не удался: {response1.status_code}")
+        
+        analysis = response1.json()['choices'][0]['message']['content']
+        logger.info(f"Анализ получен: {len(analysis)} символов")
+        
+        # Генерируем новое объявление
+        logger.info("Генерирую улучшенное объявление...")
+        payload2 = {
+            "model": "gryphe/mythomax-l2-13b:free",
+            "messages": [
+                {"role": "system", "content": "Ты профессиональный копирайтер для Авито. Создавай продающие объявления."},
+                {"role": "user", "content": f"Проанализированное объявление:\n{analysis}\n\n{generation_prompt}"}
+            ],
+            "max_tokens": 2000,
             "temperature": 0.7
         }
         
-        logger.info("Отправляю запрос к OpenRouter...")
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        response2 = await loop.run_in_executor(
             None, 
-            lambda: requests.post(API_URL, headers=headers, json=payload, timeout=60)
+            lambda: requests.post(API_URL, headers=headers, json=payload2, timeout=60)
         )
         
-        if response.status_code == 200:
-            result = response.json()
+        if response2.status_code == 200:
+            result = response2.json()
             final_text = result['choices'][0]['message']['content']
             logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
             return final_text
         else:
-            logger.error(f"❌ Ошибка OpenRouter: {response.status_code} - {response.text}")
-            return generate_template_text(user_data, user_text)
+            logger.error(f"❌ Ошибка OpenRouter: {response2.status_code} - {response2.text}")
+            return "❌ Ошибка генерации. Попробуйте позже."
         
     except Exception as e:
         logger.error(f"❌ ОШИБКА ПРИ ГЕНЕРАЦИИ: {e}")
-        return generate_template_text(user_data, user_text)
-
-# ---------- Шаблонный генератор (запасной) ----------
-def generate_template_text(data, user_text):
-    niche = data.get('niche', 'товары')
-    product = data.get('product', 'товар')
-    audience = data.get('audience', 'клиенты')
-    advantages = data.get('advantages', '')
-    
-    if niche.lower() == product.lower():
-        title = f"{product}"
-    else:
-        title = f"{product} | {niche}"
-    
-    if 'частник' in audience.lower() or 'дач' in audience.lower():
-        audience_block = "🏠 Для дома и дачи\n✅ Недорого\n✅ Можно немного"
-    elif 'юрлиц' in audience.lower() or 'компани' in audience.lower():
-        audience_block = "🏢 Для бизнеса\n✅ Работаем по договору\n✅ Безналичный расчёт\n✅ Закрывающие документы"
-    elif 'перекуп' in audience.lower() or 'опт' in audience.lower():
-        audience_block = "📦 Оптовым клиентам\n✅ Скидки от объема\n✅ Постоянное наличие"
-    else:
-        audience_block = "👥 Для всех клиентов\n✅ Индивидуальный подход"
-    
-    if advantages:
-        adv_list = [a.strip() for a in advantages.split(',')]
-        adv_block = "\n".join([f"✅ {adv}" for adv in adv_list if adv])
-    else:
-        adv_block = ""
-    
-    result = f"""📢 {title}
-
-{product} отличного качества. {audience_block.split(chr(10))[0]}
-
-Что предлагаем:
-✅ {product}
-{audience_block}
-{adv_block}
-
-Почему выбирают нас:
-✅ Быстрая обратная связь
-✅ Работаем честно и прозрачно
-✅ Индивидуальный подход
-
-📞 Звоните или пишите! Проконсультирую по любым вопросам.
-
----
-На основе вашего описания:
-{user_text}"""
-    
-    return result
+        return "❌ Ошибка нейросети. Попробуйте позже."
 
 # ---------- Команда /start ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(
-        "👋 Привет! Я помогу создать продающее объявление для Авито.\n\n"
-        "📝 Я задам несколько вопросов, а потом сгенерирую текст с помощью нейросети (OpenRouter).\n\n"
-        "Какая у вас ниша? (например: стройматериалы, сантехника, услуги)"
+        "👋 Привет! Я помогу проанализировать твоё объявление и создать улучшенный вариант.\n\n"
+        "📝 Отправь мне **ссылку на твоё объявление на Авито**"
     )
+    await state.set_state(Form.waiting_for_url)
+
+# ---------- Шаг 1: Ссылка на объявление ----------
+@dp.message(Form.waiting_for_url)
+async def process_url(message: types.Message, state: FSMContext):
+    url = message.text.strip()
+    
+    # Простейшая проверка, что это ссылка на Авито
+    if 'avito.ru' not in url:
+        await message.answer("❌ Это не похоже на ссылку на Авито. Попробуй ещё раз.")
+        return
+    
+    await state.update_data(url=url)
+    await message.answer("Какая у вас **ниша**? (например: стройматериалы, сантехника, услуги)")
     await state.set_state(Form.waiting_for_niche)
 
-# ---------- Шаг 1: Ниша ----------
+# ---------- Шаг 2: Ниша ----------
 @dp.message(Form.waiting_for_niche)
 async def process_niche(message: types.Message, state: FSMContext):
     await state.update_data(niche=message.text)
-    await message.answer("Что именно вы продаёте? (например: бой бетона, смесители, вывоз мусора)")
+    await message.answer("Что именно вы **продаёте**? (например: бой бетона, смесители, вывоз мусора)")
     await state.set_state(Form.waiting_for_product)
 
-# ---------- Шаг 2: Товар/услуга ----------
+# ---------- Шаг 3: Товар/услуга ----------
 @dp.message(Form.waiting_for_product)
 async def process_product(message: types.Message, state: FSMContext):
     await state.update_data(product=message.text)
-    await message.answer("Кто ваша целевая аудитория? (частники, юрлица, перекупы)")
+    await message.answer("Кто ваша **целевая аудитория**? (частники, юрлица, перекупы)")
     await state.set_state(Form.waiting_for_audience)
 
-# ---------- Шаг 3: Аудитория ----------
+# ---------- Шаг 4: Аудитория ----------
 @dp.message(Form.waiting_for_audience)
 async def process_audience(message: types.Message, state: FSMContext):
     await state.update_data(audience=message.text)
-    await message.answer("Какие у вас преимущества перед конкурентами? (например: доставка, скидки, гарантия, работа с юрлицами)")
+    await message.answer("Какие у вас **преимущества** перед конкурентами? (например: доставка, скидки, гарантия, работа с юрлицами)")
     await state.set_state(Form.waiting_for_advantages)
 
-# ---------- Шаг 4: Преимущества ----------
+# ---------- Шаг 5: Преимущества (финальный) ----------
 @dp.message(Form.waiting_for_advantages)
 async def process_advantages(message: types.Message, state: FSMContext):
     await state.update_data(advantages=message.text)
-    await message.answer(
-        "📝 А теперь напишите своими словами, как вы обычно продаёте.\n"
-        "Можно просто 2-3 предложения, как вы бы описали товар клиенту."
-    )
-    await state.set_state(Form.waiting_for_input_text)
-
-# ---------- Шаг 5: Своими словами ----------
-@dp.message(Form.waiting_for_input_text)
-async def process_input_text(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
-    user_text = message.text
     
-    await message.answer("⏳ Генерирую объявление с помощью нейросети... (может занять до 30 секунд)")
+    await message.answer("⏳ Анализирую объявление и генерирую улучшенный вариант... (может занять до 1 минуты)")
     
-    result = await generate_with_ai(user_data, user_text)
+    # Генерация с анализом
+    result = await analyze_and_generate(user_data['url'], user_data)
     
+    # Сохраняем в историю
     category = user_data.get('niche', 'разное')
-    save_generation(message.from_user.id, f"{user_data['niche']} | {user_data['product']}", result, category)
+    save_generation(
+        message.from_user.id, 
+        f"{user_data['niche']} | {user_data['product']}", 
+        result, 
+        category
+    )
     
     await message.answer(result)
     await message.answer(
@@ -300,7 +289,7 @@ async def main():
     init_db()
     asyncio.create_task(run_web_server())
     
-    logger.info("Бот запущен и готов к работе с OpenRouter!")
+    logger.info("Бот запущен и готов к работе с анализом объявлений!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

@@ -16,10 +16,8 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
 
-# Токен Hugging Face из переменных окружения
-HF_TOKEN = os.environ.get("HF_TOKEN")
-if not HF_TOKEN:
-    raise ValueError("HF_TOKEN не задан в переменных окружения")
+# Токен Hugging Face (ВСТАВЛЕН НАПРЯМУЮ)
+HF_TOKEN = "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"
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -79,12 +77,15 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
-# ---------- Генерация через нейросеть с JTBD/CJM-анализом ----------
+# ---------- Генерация через нейросеть YandexGPT с JTBD/CJM-анализом ----------
 async def generate_with_ai(user_data, user_text):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
     audience = user_data.get('audience', 'клиенты')
     advantages = user_data.get('advantages', '')
+    
+    logger.info(f"=== НАЧАЛО ГЕНЕРАЦИИ ===")
+    logger.info(f"Товар: {product}, Ниша: {niche}, Аудитория: {audience}")
     
     # ШАГ 1: Анализ аудитории (JTBD)
     analysis_prompt = f"""Ты профессиональный маркетолог. Проанализируй целевую аудиторию для товара/услуги.
@@ -121,9 +122,9 @@ async def generate_with_ai(user_data, user_text):
 - Барьеры
 - Что помогает принять решение"""
     
-    # ШАГ 3: Генерация объявления на основе анализа
     try:
         # Получаем анализ аудитории
+        logger.info("Запрос JTBD-анализа...")
         analysis_response = hf_client.chat_completion(
             model="yandex/YandexGPT-5-Lite-8B-instruct",
             messages=[
@@ -137,6 +138,7 @@ async def generate_with_ai(user_data, user_text):
         logger.info(f"JTBD-анализ выполнен: {len(analysis_result)} символов")
         
         # Получаем CJM
+        logger.info("Запрос CJM-анализа...")
         cjm_response = hf_client.chat_completion(
             model="yandex/YandexGPT-5-Lite-8B-instruct",
             messages=[
@@ -174,6 +176,7 @@ async def generate_with_ai(user_data, user_text):
 
 Используй живые формулировки, как в разговоре с клиентом."""
         
+        logger.info("Запрос финального объявления...")
         final_response = hf_client.chat_completion(
             model="yandex/YandexGPT-5-Lite-8B-instruct",
             messages=[
@@ -184,11 +187,13 @@ async def generate_with_ai(user_data, user_text):
             temperature=0.5
         )
         
-        return final_response.choices[0].message.content
+        final_text = final_response.choices[0].message.content
+        logger.info(f"Финальный текст получен: {len(final_text)} символов")
+        return final_text
         
     except Exception as e:
-        logger.error(f"Ошибка при генерации: {e}")
-        return generate_template_text(user_data, user_text)
+        logger.error(f"ОШИБКА ПРИ ГЕНЕРАЦИИ: {e}")
+        return f"❌ Ошибка нейросети: {e}"
 
 # ---------- Шаблонный генератор (запасной) ----------
 def generate_template_text(data, user_text):

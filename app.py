@@ -76,7 +76,7 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
-# ---------- Генерация через YandexGPT с JTBD/CJM-анализом (прямые HTTP-запросы) ----------
+# ---------- Генерация через YandexGPT (правильный эндпоинт) ----------
 async def generate_with_ai(user_data, user_text):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
@@ -86,143 +86,71 @@ async def generate_with_ai(user_data, user_text):
     logger.info(f"=== НАЧАЛО ГЕНЕРАЦИИ ===")
     logger.info(f"Товар: {product}, Ниша: {niche}, Аудитория: {audience}")
     
-    # ШАГ 1: Анализ аудитории (JTBD)
-    analysis_prompt = f"""Ты профессиональный маркетолог. Проанализируй целевую аудиторию для товара/услуги.
+    # Формируем промпт в формате, который понимает YandexGPT
+    prompt = f"""Ты профессиональный копирайтер для Авито. Создай продающее объявление.
 
 НИША: {niche}
 ТОВАР/УСЛУГА: {product}
 ЦЕЛЕВАЯ АУДИТОРИЯ: {audience}
 ПРЕИМУЩЕСТВА: {advantages}
-
-Проведи анализ по методике JTBD (Jobs To Be Done):
-
-1. **Ситуация**: В какой ситуации находится клиент, когда ему нужен этот товар/услуга?
-2. **Мотивация**: Что именно мотивирует клиента искать решение?
-3. **Ожидаемый результат**: Какой конкретный результат нужен клиенту?
-4. **Барьеры**: Что мешает клиенту совершить покупку?
-5. **Эмоции**: Какие эмоции испытывает клиент на каждом этапе?
-
-Ответ напиши кратко, структурированно."""
-    
-    # ШАГ 2: Построение карты пути клиента (CJM)
-    cjm_prompt = f"""На основе анализа аудитории построй карту пути клиента (CJM):
-
-Этапы:
-1. **Осведомленность**: Как клиент узнаёт о проблеме и ищет информацию?
-2. **Рассмотрение**: Как выбирает между разными вариантами?
-3. **Покупка**: Что важно в момент принятия решения?
-4. **Опыт**: Что происходит после покупки?
-5. **Лояльность**: Почему клиент возвращается?
-
-Для каждого этапа укажи:
-- Действия клиента
-- Точки контакта
-- Эмоции
-- Барьеры
-- Что помогает принять решение"""
-    
-    try:
-        API_URL = "https://router.huggingface.co/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {HF_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        loop = asyncio.get_event_loop()
-        
-        # Получаем анализ аудитории
-        logger.info("Запрос JTBD-анализа...")
-        payload1 = {
-            "model": "yandex/YandexGPT-5-Lite-8B-instruct",
-            "messages": [
-                {"role": "system", "content": "Ты профессиональный маркетолог, эксперт по JTBD и CJM."},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            "max_tokens": 800,
-            "temperature": 0.5
-        }
-        
-        response1 = await loop.run_in_executor(
-            None, 
-            lambda: requests.post(API_URL, headers=headers, json=payload1, timeout=30)
-        )
-        
-        if response1.status_code != 200:
-            raise Exception(f"JTBD анализ не удался: {response1.status_code}")
-        
-        analysis_result = response1.json()['choices'][0]['message']['content']
-        logger.info(f"JTBD-анализ выполнен: {len(analysis_result)} символов")
-        
-        # Получаем CJM
-        logger.info("Запрос CJM-анализа...")
-        payload2 = {
-            "model": "yandex/YandexGPT-5-Lite-8B-instruct",
-            "messages": [
-                {"role": "system", "content": "Ты профессиональный маркетолог, эксперт по CJM."},
-                {"role": "user", "content": cjm_prompt}
-            ],
-            "max_tokens": 800,
-            "temperature": 0.5
-        }
-        
-        response2 = await loop.run_in_executor(
-            None, 
-            lambda: requests.post(API_URL, headers=headers, json=payload2, timeout=30)
-        )
-        
-        if response2.status_code != 200:
-            raise Exception(f"CJM анализ не удался: {response2.status_code}")
-        
-        cjm_result = response2.json()['choices'][0]['message']['content']
-        logger.info(f"CJM-анализ выполнен: {len(cjm_result)} символов")
-        
-        # Генерируем финальное объявление
-        final_prompt = f"""Ты профессиональный копирайтер для Авито. На основе проведённого анализа создай продающее объявление.
-
-РЕЗУЛЬТАТЫ АНАЛИЗА АУДИТОРИИ:
-{analysis_result}
-
-КАРТА ПУТИ КЛИЕНТА:
-{cjm_result}
-
-ТОВАР: {product}
-НИША: {niche}
-АУДИТОРИЯ: {audience}
-ПРЕИМУЩЕСТВА: {advantages}
 ОПИСАНИЕ ПРОДАВЦА: {user_text}
 
 ТРЕБОВАНИЯ К ОБЪЯВЛЕНИЮ:
 1. Заголовок должен отражать главную потребность клиента
-2. В описании используй формулировки из анализа (как говорят сами клиенты)
-3. Сними барьеры, которые мешают покупке
-4. Добавь эмодзи для структуры (✅, ⭐️, ☑️)
-5. В конце добавь призыв к действию
-6. Фраза "Добавьте в избранное" в конце
+2. В описании используй живые формулировки
+3. Добавь эмодзи для структуры (✅, ⭐️, ☑️)
+4. В конце добавь призыв к действию
+5. Фраза "Добавьте в избранное" в конце
 
-Используй живые формулировки, как в разговоре с клиентом."""
-        
-        logger.info("Запрос финального объявления...")
-        payload3 = {
-            "model": "yandex/YandexGPT-5-Lite-8B-instruct",
-            "messages": [
-                {"role": "system", "content": "Ты профессиональный копирайтер для Авито. Создавай структурированные, продающие объявления."},
-                {"role": "user", "content": final_prompt}
-            ],
-            "max_tokens": 2500,
-            "temperature": 0.5
+Используй живые формулировки, как в разговоре с клиентом.
+
+Ассистент:[SEP]"""
+    
+    try:
+        # Используем текстовый эндпоинт, а не чат-комплишнс
+        API_URL = "https://api-inference.huggingface.co/models/yandex/YandexGPT-5-Lite-8B-instruct"
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "application/json"
         }
         
-        response3 = await loop.run_in_executor(
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 2500,
+                "temperature": 0.5,
+                "top_p": 0.9,
+                "do_sample": True,
+                "return_full_text": False
+            }
+        }
+        
+        logger.info("Отправляю запрос к Hugging Face Inference API...")
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
             None, 
-            lambda: requests.post(API_URL, headers=headers, json=payload3, timeout=60)
+            lambda: requests.post(API_URL, headers=headers, json=payload, timeout=60)
         )
         
-        if response3.status_code != 200:
-            raise Exception(f"Финальная генерация не удалась: {response3.status_code}")
+        if response.status_code == 200:
+            result = response.json()
+            # API возвращает список, первый элемент — сгенерированный текст
+            if isinstance(result, list) and len(result) > 0:
+                final_text = result[0].get('generated_text', '')
+                # Убираем возможные артефакты
+                final_text = final_text.replace('</s>', '').strip()
+                logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
+                return final_text
+            else:
+                logger.error(f"Странный ответ API: {result}")
+                return generate_template_text(user_data, user_text)
+        else:
+            logger.error(f"❌ Ошибка API: {response.status_code} - {response.text}")
+            return generate_template_text(user_data, user_text)
         
-        final_text = response3.json()['choices'][0]['message']['content']
-        logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
-        return final_text
-        
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при запросе к API")
+        return generate_template_text(user_data, user_text)
     except Exception as e:
         logger.error(f"❌ ОШИБКА ПРИ ГЕНЕРАЦИИ: {e}")
         return generate_template_text(user_data, user_text)
@@ -325,7 +253,7 @@ async def process_input_text(message: types.Message, state: FSMContext):
     
     await message.answer("⏳ Генерирую объявление с помощью YandexGPT... (может занять до 1 минуты)")
     
-    # Используем нейросеть с JTBD/CJM-анализом
+    # Используем нейросеть с правильным эндпоинтом
     result = await generate_with_ai(user_data, user_text)
     
     category = user_data.get('niche', 'разное')
@@ -379,7 +307,7 @@ async def main():
     init_db()
     asyncio.create_task(run_web_server())
     
-    logger.info("Бот запущен и готов к работе с YandexGPT и JTBD/CJM-анализом!")
+    logger.info("Бот запущен и готов к работе с YandexGPT!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

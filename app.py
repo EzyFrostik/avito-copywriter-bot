@@ -8,15 +8,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import os
+import requests
 from aiohttp import web
-from huggingface_hub import InferenceClient
 
 # Токен из переменных окружения
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
 
-# Токен Hugging Face (теперь из переменных окружения)
+# Токен Hugging Face из переменных окружения
 HF_TOKEN = os.environ.get("HF_TOKEN")
 if not HF_TOKEN:
     raise ValueError("HF_TOKEN не задан в переменных окружения")
@@ -29,9 +29,6 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
-# Клиент Hugging Face
-hf_client = InferenceClient(token=HF_TOKEN)
 
 # ---------- База данных ----------
 def init_db():
@@ -79,7 +76,7 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
-# ---------- Генерация через нейросеть YandexGPT с JTBD/CJM-анализом ----------
+# ---------- Генерация через YandexGPT с JTBD/CJM-анализом (прямые HTTP-запросы) ----------
 async def generate_with_ai(user_data, user_text):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
@@ -125,32 +122,57 @@ async def generate_with_ai(user_data, user_text):
 - Что помогает принять решение"""
     
     try:
+        API_URL = "https://router.huggingface.co/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        loop = asyncio.get_event_loop()
+        
         # Получаем анализ аудитории
         logger.info("Запрос JTBD-анализа...")
-        analysis_response = hf_client.chat_completion(
-            model="yandex/YandexGPT-5-Lite-8B-instruct",
-            messages=[
+        payload1 = {
+            "model": "yandex/YandexGPT-5-Lite-8B-instruct",
+            "messages": [
                 {"role": "system", "content": "Ты профессиональный маркетолог, эксперт по JTBD и CJM."},
                 {"role": "user", "content": analysis_prompt}
             ],
-            max_tokens=800,
-            temperature=0.5
+            "max_tokens": 800,
+            "temperature": 0.5
+        }
+        
+        response1 = await loop.run_in_executor(
+            None, 
+            lambda: requests.post(API_URL, headers=headers, json=payload1, timeout=30)
         )
-        analysis_result = analysis_response.choices[0].message.content
+        
+        if response1.status_code != 200:
+            raise Exception(f"JTBD анализ не удался: {response1.status_code}")
+        
+        analysis_result = response1.json()['choices'][0]['message']['content']
         logger.info(f"JTBD-анализ выполнен: {len(analysis_result)} символов")
         
         # Получаем CJM
         logger.info("Запрос CJM-анализа...")
-        cjm_response = hf_client.chat_completion(
-            model="yandex/YandexGPT-5-Lite-8B-instruct",
-            messages=[
+        payload2 = {
+            "model": "yandex/YandexGPT-5-Lite-8B-instruct",
+            "messages": [
                 {"role": "system", "content": "Ты профессиональный маркетолог, эксперт по CJM."},
                 {"role": "user", "content": cjm_prompt}
             ],
-            max_tokens=800,
-            temperature=0.5
+            "max_tokens": 800,
+            "temperature": 0.5
+        }
+        
+        response2 = await loop.run_in_executor(
+            None, 
+            lambda: requests.post(API_URL, headers=headers, json=payload2, timeout=30)
         )
-        cjm_result = cjm_response.choices[0].message.content
+        
+        if response2.status_code != 200:
+            raise Exception(f"CJM анализ не удался: {response2.status_code}")
+        
+        cjm_result = response2.json()['choices'][0]['message']['content']
         logger.info(f"CJM-анализ выполнен: {len(cjm_result)} символов")
         
         # Генерируем финальное объявление
@@ -179,23 +201,31 @@ async def generate_with_ai(user_data, user_text):
 Используй живые формулировки, как в разговоре с клиентом."""
         
         logger.info("Запрос финального объявления...")
-        final_response = hf_client.chat_completion(
-            model="yandex/YandexGPT-5-Lite-8B-instruct",
-            messages=[
+        payload3 = {
+            "model": "yandex/YandexGPT-5-Lite-8B-instruct",
+            "messages": [
                 {"role": "system", "content": "Ты профессиональный копирайтер для Авито. Создавай структурированные, продающие объявления."},
                 {"role": "user", "content": final_prompt}
             ],
-            max_tokens=2500,
-            temperature=0.5
+            "max_tokens": 2500,
+            "temperature": 0.5
+        }
+        
+        response3 = await loop.run_in_executor(
+            None, 
+            lambda: requests.post(API_URL, headers=headers, json=payload3, timeout=60)
         )
         
-        final_text = final_response.choices[0].message.content
-        logger.info(f"Финальный текст получен: {len(final_text)} символов")
+        if response3.status_code != 200:
+            raise Exception(f"Финальная генерация не удалась: {response3.status_code}")
+        
+        final_text = response3.json()['choices'][0]['message']['content']
+        logger.info(f"✅ Финальный текст получен: {len(final_text)} символов")
         return final_text
         
     except Exception as e:
-        logger.error(f"ОШИБКА ПРИ ГЕНЕРАЦИИ: {e}")
-        return f"❌ Ошибка нейросети: {e}"
+        logger.error(f"❌ ОШИБКА ПРИ ГЕНЕРАЦИИ: {e}")
+        return generate_template_text(user_data, user_text)
 
 # ---------- Шаблонный генератор (запасной) ----------
 def generate_template_text(data, user_text):

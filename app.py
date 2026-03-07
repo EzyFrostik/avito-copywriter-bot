@@ -7,15 +7,19 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-
-# Токен берется из переменных окружения на Render
 import os
+from aiohttp import web
+
+# Токен из переменных окружения
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
+# Инициализация бота
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -58,7 +62,7 @@ def get_user_history(user_id):
     conn.close()
     return rows
 
-# ---------- Машина состояний (опросник) ----------
+# ---------- Машина состояний ----------
 class Form(StatesGroup):
     waiting_for_niche = State()
     waiting_for_product = State()
@@ -72,7 +76,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(
         "👋 Привет! Я помогу создать продающее объявление для Авито.\n\n"
         "📝 Я задам несколько вопросов, а потом сгенерирую текст.\n\n"
-        "Какая у вас **ниша**? (например: стройматериалы, сантехника, услуги)"
+        "**Какая у вас ниша?** (например: стройматериалы, сантехника, услуги)"
     )
     await state.set_state(Form.waiting_for_niche)
 
@@ -113,13 +117,10 @@ async def process_input_text(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_text = message.text
     
-    await message.answer("⏳ Генерирую объявление... (пока без нейросети, просто шаблон)")
+    await message.answer("⏳ Генерирую объявление...")
     
-    # Здесь будет генерация через нейросеть
-    # Пока делаем простой шаблон для теста
     result = generate_template_text(user_data, user_text)
     
-    # Сохраняем в историю
     category = user_data.get('niche', 'разное')
     save_generation(message.from_user.id, f"{user_data['niche']} | {user_data['product']}", result, category)
     
@@ -131,14 +132,13 @@ async def process_input_text(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# ---------- Шаблонный генератор (для теста) ----------
+# ---------- Шаблонный генератор ----------
 def generate_template_text(data, user_text):
     niche = data.get('niche', 'товары')
     product = data.get('product', 'товар')
     audience = data.get('audience', 'клиенты')
     advantages = data.get('advantages', '')
     
-    # Определяем аудиторию
     if 'частник' in audience.lower() or 'дач' in audience.lower():
         audience_block = "🏠 Для дома и дачи\n✅ Недорого\n✅ Можно немного"
     elif 'юрлиц' in audience.lower() or 'компани' in audience.lower():
@@ -148,20 +148,15 @@ def generate_template_text(data, user_text):
     else:
         audience_block = "👥 Для всех клиентов\n✅ Индивидуальный подход"
     
-    # Преимущества
     if advantages:
         adv_list = [a.strip() for a in advantages.split(',')]
         adv_block = "\n".join([f"✅ {adv}" for adv in adv_list if adv])
     else:
         adv_block = ""
     
-    # Формируем заголовок
     title = f"{product} | {niche}"
-    
-    # Формируем оффер (первые строки)
     offer = f"{product} отличного качества. {audience_block.split(chr(10))[0]}"
     
-    # Собираем всё вместе
     result = f"""📢 **{title}**
 
 {offer}
@@ -175,12 +170,12 @@ def generate_template_text(data, user_text):
 **Почему выбирают нас:**
 ✅ Быстрая обратная связь
 ✅ Работаем честно и прозрачно
-✅ Индивидуальный подход к каждому клиенту
+✅ Индивидуальный подход
 
-📞 **Звоните или пишите!** Проконсультирую по любым вопросам.
+📞 **Звоните или пишите!**
 
 ---
-*Сгенерировано ботом на основе вашего описания:*  
+*На основе вашего описания:*  
 _{user_text[:100]}..._"""
     
     return result
@@ -196,19 +191,42 @@ async def cmd_history(message: types.Message):
     
     response = "📚 **Ваши последние генерации:**\n\n"
     for i, (user_input, gen_text, date) in enumerate(history, 1):
-        date_formatted = date.split('T')[0]  # берём только дату
+        date_formatted = date.split('T')[0]
         preview = gen_text[:100] + "..." if len(gen_text) > 100 else gen_text
         response += f"{i}. _{date_formatted}_: {user_input}\n   `{preview}`\n\n"
     
     await message.answer(response)
 
-# ---------- Запуск бота ----------
+# ---------- Веб-сервер для Render ----------
+async def handle(request):
+    return web.Response(text="Бот работает!")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    app.router.add_get('/health', handle)
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Веб-сервер запущен на порту {port}")
+
+# ---------- Запуск ----------
 async def main():
-    # Инициализируем базу данных
+    # Сначала удаляем вебхук
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Вебхук удалён")
+    
+    # Инициализируем базу
     init_db()
     
-    # Запускаем бота
-    print("Бот запущен и готов к работе!")
+    # Запускаем веб-сервер в фоне
+    asyncio.create_task(run_web_server())
+    
+    logger.info("Бот запущен и готов к работе!")
+    
+    # Запускаем поллинг
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

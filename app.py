@@ -79,49 +79,115 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
-# ---------- Генерация через нейросеть YandexGPT ----------
+# ---------- Генерация через нейросеть с JTBD/CJM-анализом ----------
 async def generate_with_ai(user_data, user_text):
     niche = user_data.get('niche', 'товары')
     product = user_data.get('product', 'товар')
     audience = user_data.get('audience', 'клиенты')
     advantages = user_data.get('advantages', '')
     
-    # Формируем промпт для нейросети
-    prompt = f"""Ты профессиональный копирайтер для Авито. Создай продающее объявление.
+    # ШАГ 1: Анализ аудитории (JTBD)
+    analysis_prompt = f"""Ты профессиональный маркетолог. Проанализируй целевую аудиторию для товара/услуги.
 
-Ниша: {niche}
-Товар/услуга: {product}
-Целевая аудитория: {audience}
-Преимущества: {advantages}
+НИША: {niche}
+ТОВАР/УСЛУГА: {product}
+ЦЕЛЕВАЯ АУДИТОРИЯ: {audience}
+ПРЕИМУЩЕСТВА: {advantages}
 
-Описание от продавца: {user_text}
+Проведи анализ по методике JTBD (Jobs To Be Done):
 
-Требования к объявлению:
-1. Заголовок (цепляющий, с ключевыми словами)
-2. Краткое описание (2-3 предложения)
-3. Список преимуществ (с эмодзи)
-4. Почему выбирают нас (с эмодзи)
-5. Призыв к действию
+1. **Ситуация**: В какой ситуации находится клиент, когда ему нужен этот товар/услуга?
+2. **Мотивация**: Что именно мотивирует клиента искать решение?
+3. **Ожидаемый результат**: Какой конкретный результат нужен клиенту?
+4. **Барьеры**: Что мешает клиенту совершить покупку?
+5. **Эмоции**: Какие эмоции испытывает клиент на каждом этапе?
 
-Объявление должно быть на русском, живым языком, без воды."""
+Ответ напиши кратко, структурированно."""
+    
+    # ШАГ 2: Построение карты пути клиента (CJM)
+    cjm_prompt = f"""На основе анализа аудитории построй карту пути клиента (CJM):
 
+Этапы:
+1. **Осведомленность**: Как клиент узнаёт о проблеме и ищет информацию?
+2. **Рассмотрение**: Как выбирает между разными вариантами?
+3. **Покупка**: Что важно в момент принятия решения?
+4. **Опыт**: Что происходит после покупки?
+5. **Лояльность**: Почему клиент возвращается?
+
+Для каждого этапа укажи:
+- Действия клиента
+- Точки контакта
+- Эмоции
+- Барьеры
+- Что помогает принять решение"""
+    
+    # ШАГ 3: Генерация объявления на основе анализа
     try:
-        # Используем YandexGPT через Hugging Face
-        response = hf_client.chat_completion(
-            model="yandex/YandexGPT-5-Lite-8B-instruct",  # Бесплатная модель
+        # Получаем анализ аудитории
+        analysis_response = hf_client.chat_completion(
+            model="yandex/YandexGPT-5-Lite-8B-instruct",
             messages=[
-                {"role": "system", "content": "Ты профессиональный копирайтер для Авито."},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "Ты профессиональный маркетолог, эксперт по JTBD и CJM."},
+                {"role": "user", "content": analysis_prompt}
             ],
             max_tokens=800,
-            temperature=0.7
+            temperature=0.5
+        )
+        analysis_result = analysis_response.choices[0].message.content
+        logger.info(f"JTBD-анализ выполнен: {len(analysis_result)} символов")
+        
+        # Получаем CJM
+        cjm_response = hf_client.chat_completion(
+            model="yandex/YandexGPT-5-Lite-8B-instruct",
+            messages=[
+                {"role": "system", "content": "Ты профессиональный маркетолог, эксперт по CJM."},
+                {"role": "user", "content": cjm_prompt}
+            ],
+            max_tokens=800,
+            temperature=0.5
+        )
+        cjm_result = cjm_response.choices[0].message.content
+        logger.info(f"CJM-анализ выполнен: {len(cjm_result)} символов")
+        
+        # Генерируем финальное объявление
+        final_prompt = f"""Ты профессиональный копирайтер для Авито. На основе проведённого анализа создай продающее объявление.
+
+РЕЗУЛЬТАТЫ АНАЛИЗА АУДИТОРИИ:
+{analysis_result}
+
+КАРТА ПУТИ КЛИЕНТА:
+{cjm_result}
+
+ТОВАР: {product}
+НИША: {niche}
+АУДИТОРИЯ: {audience}
+ПРЕИМУЩЕСТВА: {advantages}
+ОПИСАНИЕ ПРОДАВЦА: {user_text}
+
+ТРЕБОВАНИЯ К ОБЪЯВЛЕНИЮ:
+1. Заголовок должен отражать главную потребность клиента
+2. В описании используй формулировки из анализа (как говорят сами клиенты)
+3. Сними барьеры, которые мешают покупке
+4. Добавь эмодзи для структуры (✅, ⭐️, ☑️)
+5. В конце добавь призыв к действию
+6. Фраза "Добавьте в избранное" в конце
+
+Используй живые формулировки, как в разговоре с клиентом."""
+        
+        final_response = hf_client.chat_completion(
+            model="yandex/YandexGPT-5-Lite-8B-instruct",
+            messages=[
+                {"role": "system", "content": "Ты профессиональный копирайтер для Авито. Создавай структурированные, продающие объявления."},
+                {"role": "user", "content": final_prompt}
+            ],
+            max_tokens=2500,
+            temperature=0.5
         )
         
-        ai_text = response.choices[0].message.content
-        return ai_text
+        return final_response.choices[0].message.content
+        
     except Exception as e:
         logger.error(f"Ошибка при генерации: {e}")
-        # Если нейросеть не сработала, используем шаблон
         return generate_template_text(user_data, user_text)
 
 # ---------- Шаблонный генератор (запасной) ----------
@@ -220,9 +286,9 @@ async def process_input_text(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_text = message.text
     
-    await message.answer("⏳ Генерирую объявление с помощью YandexGPT... (может занять до 30 секунд)")
+    await message.answer("⏳ Генерирую объявление с помощью YandexGPT... (может занять до 1 минуты)")
     
-    # Используем нейросеть
+    # Используем нейросеть с JTBD/CJM-анализом
     result = await generate_with_ai(user_data, user_text)
     
     category = user_data.get('niche', 'разное')
@@ -275,7 +341,7 @@ async def main():
     init_db()
     asyncio.create_task(run_web_server())
     
-    logger.info("Бот запущен и готов к работе с YandexGPT!")
+    logger.info("Бот запущен и готов к работе с YandexGPT и JTBD/CJM-анализом!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

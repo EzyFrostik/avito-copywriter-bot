@@ -9,11 +9,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import os
 from aiohttp import web
+from huggingface_hub import InferenceClient
 
 # Токен из переменных окружения
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
+
+# Токен Hugging Face из переменных окружения
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if not HF_TOKEN:
+    raise ValueError("HF_TOKEN не задан в переменных окружения")
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +29,9 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+# Клиент Hugging Face
+hf_client = InferenceClient(token=HF_TOKEN)
 
 # ---------- База данных ----------
 def init_db():
@@ -70,12 +79,106 @@ class Form(StatesGroup):
     waiting_for_advantages = State()
     waiting_for_input_text = State()
 
+# ---------- Генерация через нейросеть YandexGPT ----------
+async def generate_with_ai(user_data, user_text):
+    niche = user_data.get('niche', 'товары')
+    product = user_data.get('product', 'товар')
+    audience = user_data.get('audience', 'клиенты')
+    advantages = user_data.get('advantages', '')
+    
+    # Формируем промпт для нейросети
+    prompt = f"""Ты профессиональный копирайтер для Авито. Создай продающее объявление.
+
+Ниша: {niche}
+Товар/услуга: {product}
+Целевая аудитория: {audience}
+Преимущества: {advantages}
+
+Описание от продавца: {user_text}
+
+Требования к объявлению:
+1. Заголовок (цепляющий, с ключевыми словами)
+2. Краткое описание (2-3 предложения)
+3. Список преимуществ (с эмодзи)
+4. Почему выбирают нас (с эмодзи)
+5. Призыв к действию
+
+Объявление должно быть на русском, живым языком, без воды."""
+
+    try:
+        # Используем YandexGPT через Hugging Face
+        response = hf_client.chat_completion(
+            model="yandex/YandexGPT-5-Lite-8B-instruct",  # Бесплатная модель
+            messages=[
+                {"role": "system", "content": "Ты профессиональный копирайтер для Авито."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=800,
+            temperature=0.7
+        )
+        
+        ai_text = response.choices[0].message.content
+        return ai_text
+    except Exception as e:
+        logger.error(f"Ошибка при генерации: {e}")
+        # Если нейросеть не сработала, используем шаблон
+        return generate_template_text(user_data, user_text)
+
+# ---------- Шаблонный генератор (запасной) ----------
+def generate_template_text(data, user_text):
+    niche = data.get('niche', 'товары')
+    product = data.get('product', 'товар')
+    audience = data.get('audience', 'клиенты')
+    advantages = data.get('advantages', '')
+    
+    if niche.lower() == product.lower():
+        title = f"{product}"
+    else:
+        title = f"{product} | {niche}"
+    
+    if 'частник' in audience.lower() or 'дач' in audience.lower():
+        audience_block = "🏠 Для дома и дачи\n✅ Недорого\n✅ Можно немного"
+    elif 'юрлиц' in audience.lower() or 'компани' in audience.lower():
+        audience_block = "🏢 Для бизнеса\n✅ Работаем по договору\n✅ Безналичный расчёт\n✅ Закрывающие документы"
+    elif 'перекуп' in audience.lower() or 'опт' in audience.lower():
+        audience_block = "📦 Оптовым клиентам\n✅ Скидки от объема\n✅ Постоянное наличие"
+    else:
+        audience_block = "👥 Для всех клиентов\n✅ Индивидуальный подход"
+    
+    if advantages:
+        adv_list = [a.strip() for a in advantages.split(',')]
+        adv_block = "\n".join([f"✅ {adv}" for adv in adv_list if adv])
+    else:
+        adv_block = ""
+    
+    result = f"""📢 {title}
+
+{product} отличного качества. {audience_block.split(chr(10))[0]}
+
+Что предлагаем:
+✅ {product}
+{audience_block}
+{adv_block}
+
+Почему выбирают нас:
+✅ Быстрая обратная связь
+✅ Работаем честно и прозрачно
+✅ Индивидуальный подход
+
+📞 Звоните или пишите! Проконсультирую по любым вопросам.
+
+---
+На основе вашего описания:
+{user_text}"""
+    
+    return result
+
 # ---------- Команда /start ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer(
         "👋 Привет! Я помогу создать продающее объявление для Авито.\n\n"
-        "📝 Я задам несколько вопросов, а потом сгенерирую текст.\n\n"
+        "📝 Я задам несколько вопросов, а потом сгенерирую текст с помощью нейросети YandexGPT.\n\n"
         "Какая у вас ниша? (например: стройматериалы, сантехника, услуги)"
     )
     await state.set_state(Form.waiting_for_niche)
@@ -117,9 +220,10 @@ async def process_input_text(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_text = message.text
     
-    await message.answer("⏳ Генерирую объявление...")
+    await message.answer("⏳ Генерирую объявление с помощью YandexGPT... (может занять до 30 секунд)")
     
-    result = generate_template_text(user_data, user_text)
+    # Используем нейросеть
+    result = await generate_with_ai(user_data, user_text)
     
     category = user_data.get('niche', 'разное')
     save_generation(message.from_user.id, f"{user_data['niche']} | {user_data['product']}", result, category)
@@ -132,60 +236,7 @@ async def process_input_text(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# ---------- Шаблонный генератор (исправленный) ----------
-def generate_template_text(data, user_text):
-    niche = data.get('niche', 'товары')
-    product = data.get('product', 'товар')
-    audience = data.get('audience', 'клиенты')
-    advantages = data.get('advantages', '')
-    
-    # Если ниша и товар совпадают, не дублируем
-    if niche.lower() == product.lower():
-        title = f"{product}"
-    else:
-        title = f"{product} | {niche}"
-    
-    # Определяем блок для аудитории
-    if 'частник' in audience.lower() or 'дач' in audience.lower():
-        audience_block = "🏠 Для дома и дачи\n✅ Недорого\n✅ Можно немного"
-    elif 'юрлиц' in audience.lower() or 'компани' in audience.lower():
-        audience_block = "🏢 Для бизнеса\n✅ Работаем по договору\n✅ Безналичный расчёт\n✅ Закрывающие документы"
-    elif 'перекуп' in audience.lower() or 'опт' in audience.lower():
-        audience_block = "📦 Оптовым клиентам\n✅ Скидки от объема\n✅ Постоянное наличие"
-    else:
-        audience_block = "👥 Для всех клиентов\n✅ Индивидуальный подход"
-    
-    # Формируем блок преимуществ
-    if advantages:
-        adv_list = [a.strip() for a in advantages.split(',')]
-        adv_block = "\n".join([f"✅ {adv}" for adv in adv_list if adv])
-    else:
-        adv_block = ""
-    
-    # Собираем текст
-    result = f"""📢 {title}
-
-{product} отличного качества. {audience_block.split(chr(10))[0]}
-
-Что предлагаем:
-✅ {product}
-{audience_block}
-{adv_block}
-
-Почему выбирают нас:
-✅ Быстрая обратная связь
-✅ Работаем честно и прозрачно
-✅ Индивидуальный подход
-
-📞 Звоните или пишите! Проконсультирую по любым вопросам.
-
----
-На основе вашего описания:
-{user_text}"""
-    
-    return result
-
-# ---------- Команда /history (показывает полный текст) ----------
+# ---------- Команда /history ----------
 @dp.message(Command("history"))
 async def cmd_history(message: types.Message):
     history = get_user_history(message.from_user.id)
@@ -194,14 +245,11 @@ async def cmd_history(message: types.Message):
         await message.answer("У вас пока нет сохранённых генераций.")
         return
     
-    await message.answer("📚 Ваши последние генерации (полный текст):")
+    await message.answer("📚 Ваши последние генерации:")
     
     for i, (user_input, gen_text, date) in enumerate(history, 1):
         date_formatted = date.split('T')[0]
-        # Отправляем каждую генерацию отдельным сообщением
-        response = f"{i}. {date_formatted}\n\n{gen_text}"
-        
-        # Если текст слишком длинный, Telegram сам разобьёт
+        response = f"📄 Генерация #{i} от {date_formatted}\n\n{gen_text}"
         await message.answer(response)
 
 # ---------- Веб-сервер для Render ----------
@@ -221,19 +269,13 @@ async def run_web_server():
 
 # ---------- Запуск ----------
 async def main():
-    # Сначала удаляем вебхук
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён")
     
-    # Инициализируем базу
     init_db()
-    
-    # Запускаем веб-сервер в фоне
     asyncio.create_task(run_web_server())
     
-    logger.info("Бот запущен и готов к работе!")
-    
-    # Запускаем поллинг
+    logger.info("Бот запущен и готов к работе с YandexGPT!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

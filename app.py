@@ -16,8 +16,10 @@ TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN не задан в переменных окружения")
 
-# Токен Hugging Face (ВСТАВЛЕН НАПРЯМУЮ)
-HF_TOKEN = "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"
+# Токен Hugging Face (теперь из переменных окружения)
+HF_TOKEN = os.environ.get("HF_TOKEN")
+if not HF_TOKEN:
+    raise ValueError("HF_TOKEN не задан в переменных окружения")
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -340,6 +342,7 @@ async def run_web_server():
 
 # ---------- Запуск ----------
 async def main():
+    # Принудительно сбрасываем все вебхуки
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён")
     

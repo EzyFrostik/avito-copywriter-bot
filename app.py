@@ -56,7 +56,7 @@ def get_user_history(user_id):
     cur = conn.cursor()
     cur.execute('''
         SELECT user_input, generated_text, created_at FROM generations
-        WHERE user_id = ? ORDER BY created_at DESC LIMIT 10
+        WHERE user_id = ? ORDER BY created_at DESC LIMIT 5
     ''', (user_id,))
     rows = cur.fetchall()
     conn.close()
@@ -132,12 +132,18 @@ async def process_input_text(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# ---------- Шаблонный генератор ----------
+# ---------- Шаблонный генератор (исправленный) ----------
 def generate_template_text(data, user_text):
     niche = data.get('niche', 'товары')
     product = data.get('product', 'товар')
     audience = data.get('audience', 'клиенты')
     advantages = data.get('advantages', '')
+    
+    # Если ниша и товар совпадают, не дублируем
+    if niche.lower() == product.lower():
+        title = f"{product}"
+    else:
+        title = f"{product} | {niche}"
     
     # Определяем блок для аудитории
     if 'частник' in audience.lower() or 'дач' in audience.lower():
@@ -157,13 +163,12 @@ def generate_template_text(data, user_text):
         adv_block = ""
     
     # Собираем текст
-    result = f"""📢 {product} | {niche}
+    result = f"""📢 {title}
 
 {product} отличного качества. {audience_block.split(chr(10))[0]}
 
 Что предлагаем:
 ✅ {product}
-✅ {niche}
 {audience_block}
 {adv_block}
 
@@ -180,7 +185,7 @@ def generate_template_text(data, user_text):
     
     return result
 
-# ---------- Команда /history ----------
+# ---------- Команда /history (показывает полный текст) ----------
 @dp.message(Command("history"))
 async def cmd_history(message: types.Message):
     history = get_user_history(message.from_user.id)
@@ -189,13 +194,15 @@ async def cmd_history(message: types.Message):
         await message.answer("У вас пока нет сохранённых генераций.")
         return
     
-    response = "📚 Ваши последние генерации:\n\n"
+    await message.answer("📚 Ваши последние генерации (полный текст):")
+    
     for i, (user_input, gen_text, date) in enumerate(history, 1):
         date_formatted = date.split('T')[0]
-        preview = gen_text[:100] + "..." if len(gen_text) > 100 else gen_text
-        response += f"{i}. {date_formatted}: {user_input}\n{preview}\n\n"
-    
-    await message.answer(response)
+        # Отправляем каждую генерацию отдельным сообщением
+        response = f"{i}. {date_formatted}\n\n{gen_text}"
+        
+        # Если текст слишком длинный, Telegram сам разобьёт
+        await message.answer(response)
 
 # ---------- Веб-сервер для Render ----------
 async def handle(request):

@@ -29,10 +29,10 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ---------- ОТЛАДКА: показываем все входящие сообщения ----------
-@dp.message()
-async def debug_all_messages(message: types.Message):
-    logger.info(f"🔍 Получено сообщение: text='{message.text}', from={message.from_user.id}, chat={message.chat.id}")
+# ---------- ОТЛАДКА: показываем все входящие обновления ----------
+@dp.update()
+async def debug_all_updates(update: types.Update):
+    logger.info(f"🔍 Получено обновление: {update.model_dump_json(indent=2)}")
     # Не отвечаем, просто логируем
 
 # ---------- Настройка PostgreSQL ----------

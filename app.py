@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -23,9 +24,13 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ---------- База данных ----------
+# ---------- База данных с таймаутом ----------
+def get_db_connection():
+    """Возвращает соединение с БД с таймаутом 10 секунд"""
+    return sqlite3.connect('users.db', timeout=10.0)
+
 def init_db():
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute('''
@@ -74,7 +79,7 @@ def init_db():
 
 # ---------- Функции пользователей ----------
 def get_user(user_id):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
     user = cur.fetchone()
@@ -82,7 +87,7 @@ def get_user(user_id):
     return user
 
 def create_user(user_id):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('''
         INSERT OR IGNORE INTO users (user_id, promo_analyses, bought_analyses, created_at)
@@ -92,7 +97,7 @@ def create_user(user_id):
     conn.close()
 
 def use_analysis(user_id):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute('SELECT promo_analyses FROM users WHERE user_id = ?', (user_id,))
@@ -115,14 +120,14 @@ def use_analysis(user_id):
     return False, None
 
 def add_promo_analyses(user_id, count):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('UPDATE users SET promo_analyses = promo_analyses + ? WHERE user_id = ?', (count, user_id))
     conn.commit()
     conn.close()
 
 def check_promo_code(code, user_id):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     
     cur.execute('''
@@ -154,24 +159,30 @@ def check_promo_code(code, user_id):
     return True, analyses_count
 
 def activate_promo_code(code, user_id):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     
+    # Получаем количество анализов
     cur.execute('SELECT analyses_count FROM promo_codes WHERE code = ?', (code,))
     analyses_count = cur.fetchone()[0]
     
+    # Обновляем счётчик использований
     cur.execute('UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?', (code,))
+    
+    # Записываем использование
     cur.execute('''
         INSERT INTO promo_uses (code, user_id, used_at)
         VALUES (?, ?, ?)
     ''', (code, user_id, datetime.now().isoformat()))
+    
+    # Начисляем анализы пользователю
     add_promo_analyses(user_id, analyses_count)
     
     conn.commit()
     conn.close()
 
 def create_promo_code(code, analyses_count, max_uses, expires_at_days, admin_id):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     expires_at = (datetime.now() + timedelta(days=expires_at_days)).date().isoformat() if expires_at_days else None
     cur.execute('''
@@ -182,7 +193,7 @@ def create_promo_code(code, analyses_count, max_uses, expires_at_days, admin_id)
     conn.close()
 
 def get_all_promo_codes():
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('SELECT code, analyses_count, max_uses, used_count, expires_at FROM promo_codes ORDER BY created_at DESC')
     codes = cur.fetchall()
@@ -190,7 +201,7 @@ def get_all_promo_codes():
     return codes
 
 def deactivate_promo_code(code):
-    conn = sqlite3.connect('users.db')
+    conn = get_db_connection()
     cur = conn.cursor()
     cur.execute('DELETE FROM promo_codes WHERE code = ?', (code.upper(),))
     conn.commit()
@@ -237,6 +248,9 @@ class PromoForm(StatesGroup):
     max_uses = State()
     days = State()
 
+class DeletePromoForm(StatesGroup):
+    code = State()
+
 # ---------- Команды и кнопки ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -276,6 +290,7 @@ async def analyze_start(message: types.Message):
 
 @dp.message(lambda message: message.text == "🎫 Ввести промокод")
 async def promo_start(message: types.Message):
+    # Для всех пользователей, включая админов, просто запрашиваем код
     await message.answer("🎫 Введи промокод:")
 
 @dp.message(lambda message: message.text == "💎 Купить анализы")
@@ -407,23 +422,34 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
+# ---------- Удаление промокода (только для админа, через состояние) ----------
 @dp.message(lambda message: message.text == "❌ Удалить промокод")
-async def admin_delete_promo(message: types.Message):
+async def admin_delete_promo_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     await message.answer("Введи код для удаления:")
+    await state.set_state(DeletePromoForm.code)
 
-@dp.message(lambda message: message.from_user.id in ADMIN_IDS and len(message.text) < 20 and message.text not in BUTTON_TEXTS and not message.text.startswith('/'))
-async def admin_delete_promo_execute(message: types.Message):
+@dp.message(DeletePromoForm.code)
+async def admin_delete_promo_execute(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        await state.clear()
+        return
     code = message.text.strip().upper()
     deactivate_promo_code(code)
     await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
+    await state.clear()
 
-@dp.message(lambda message: message.from_user.id not in ADMIN_IDS and len(message.text) < 20 and message.text not in BUTTON_TEXTS and not message.text.startswith('/'))
+# ---------- Активация промокода для всех пользователей ----------
+@dp.message(lambda message: len(message.text) < 20 and 
+            message.text not in BUTTON_TEXTS and 
+            not message.text.startswith('/'))
 async def handle_promo(message: types.Message):
     user_id = message.from_user.id
     code = message.text.strip().upper()
+    
     valid, result = check_promo_code(code, user_id)
+    
     if valid:
         activate_promo_code(code, user_id)
         await message.answer(
@@ -435,6 +461,7 @@ async def handle_promo(message: types.Message):
     else:
         await message.answer(f"❌ {result}", reply_markup=main_menu)
 
+# ---------- Обработчик ссылок на Авито ----------
 @dp.message(lambda message: 'avito.ru' in message.text)
 async def handle_url(message: types.Message):
     user_id = message.from_user.id
@@ -461,6 +488,10 @@ async def handle_url(message: types.Message):
         "Полноценный анализ будет добавлен в следующем обновлении.",
         reply_markup=main_menu
     )
+
+@dp.message(lambda message: message.text == "🏠 Главное меню")
+async def back_to_main(message: types.Message):
+    await message.answer("Главное меню:", reply_markup=main_menu)
 
 @dp.message()
 async def unknown_message(message: types.Message):

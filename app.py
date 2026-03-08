@@ -15,7 +15,7 @@ ADMIN_IDS = [867292164]  # ТВОЙ Telegram ID
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота (сессия будет создана позже)
+# Инициализация бота и диспетчера
 bot = None
 dp = Dispatcher()
 
@@ -499,20 +499,9 @@ async def main():
     # Создаём бота
     bot = Bot(token=TOKEN)
     
-    # Жёсткий сброс всех подключений
-    logger.info("Сбрасываю вебхук...")
+    # Удаляем вебхук (достаточно одного раза)
     await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(2)
-    
-    # Закрываем старую сессию и создаём новую
-    logger.info("Пересоздаю сессию...")
-    await bot.close()
-    await asyncio.sleep(1)
-    
-    # Создаём бота заново с новой сессией
-    bot = Bot(token=TOKEN)
-    
-    logger.info("Вебхук удалён, сессия пересоздана")
+    logger.info("Вебхук удалён")
     
     # Инициализация БД
     init_db()

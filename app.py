@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 import os
 
 # Токен из переменных окружения
@@ -195,7 +195,7 @@ def create_promo_code(code, analyses_count, max_uses, expires_at_days, admin_id)
     cur.execute('''
         INSERT INTO promo_codes (code, analyses_count, max_uses, expires_at, created_by, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
-    ''', (code, analyses_count, max_uses, expires_at, admin_id, datetime.now().isoformat()))
+    ''', (code.upper(), analyses_count, max_uses, expires_at, admin_id, datetime.now().isoformat()))
     
     conn.commit()
     conn.close()
@@ -211,7 +211,7 @@ def get_all_promo_codes():
 def deactivate_promo_code(code):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    cur.execute('DELETE FROM promo_codes WHERE code = ?', (code,))
+    cur.execute('DELETE FROM promo_codes WHERE code = ?', (code.upper(),))
     conn.commit()
     conn.close()
 
@@ -319,7 +319,7 @@ async def handle_url(message: types.Message):
 async def promo_start(message: types.Message):
     await message.answer("🎫 Введи промокод:")
 
-@dp.message(lambda message: message.text and len(message.text) < 20 and not message.text.startswith('/'))
+@dp.message(lambda message: message.text and len(message.text) < 20 and not message.text.startswith('/') and not message.text.startswith('🔍') and not message.text.startswith('📊') and not message.text.startswith('💎') and not message.text.startswith('👤') and not message.text.startswith('❓') and not message.text.startswith('📋') and not message.text.startswith('➕') and not message.text.startswith('❌') and not message.text.startswith('🏠'))
 async def handle_promo(message: types.Message):
     user_id = message.from_user.id
     code = message.text.strip().upper()
@@ -331,10 +331,11 @@ async def handle_promo(message: types.Message):
         await message.answer(
             f"✅ Промокод активирован!\n"
             f"Тебе начислено {result} анализа(ов).\n\n"
-            f"Можешь начинать анализ 🔍"
+            f"Можешь начинать анализ 🔍",
+            reply_markup=main_menu
         )
     else:
-        await message.answer(f"❌ {result}")
+        await message.answer(f"❌ {result}", reply_markup=main_menu)
 
 # ---------- Админ: создание промокода ----------
 @dp.message(lambda message: message.text == "➕ Создать промокод")
@@ -345,7 +346,8 @@ async def admin_create_promo(message: types.Message):
     await message.answer(
         "Введи параметры промокода в формате:\n"
         "`КОД КОЛИЧЕСТВО_АНАЛИЗОВ МАКС_ИСПОЛЬЗОВАНИЙ ДНЕЙ_ДЕЙСТВИЯ`\n\n"
-        "Пример: `PROMO10 3 5 30` — код PROMO10 на 3 анализа, 5 использований, 30 дней"
+        "Пример: `PROMO10 3 5 30` — код PROMO10 на 3 анализа, 5 использований, 30 дней\n\n"
+        "Если дней = 0 — бессрочный"
     )
 
 @dp.message(lambda message: message.from_user.id in ADMIN_IDS and len(message.text.split()) == 4)
@@ -357,9 +359,9 @@ async def admin_create_promo_execute(message: types.Message):
         days = int(days) if days != '0' else None
         
         create_promo_code(code.upper(), analyses, max_uses, days, message.from_user.id)
-        await message.answer(f"✅ Промокод {code} создан!")
+        await message.answer(f"✅ Промокод {code.upper()} создан!", reply_markup=admin_menu)
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}", reply_markup=admin_menu)
 
 # ---------- Админ: список промокодов ----------
 @dp.message(lambda message: message.text == "📋 Список промокодов")
@@ -369,7 +371,7 @@ async def admin_list_promos(message: types.Message):
     
     codes = get_all_promo_codes()
     if not codes:
-        await message.answer("Промокодов пока нет")
+        await message.answer("📭 Промокодов пока нет", reply_markup=admin_menu)
         return
     
     text = "📋 Список промокодов:\n\n"
@@ -377,7 +379,7 @@ async def admin_list_promos(message: types.Message):
         expires_str = expires if expires else "бессрочно"
         text += f"• {code}: {analyses} ан., {used}/{max_uses} исп., до {expires_str}\n"
     
-    await message.answer(text)
+    await message.answer(text, reply_markup=admin_menu)
 
 # ---------- Админ: удаление промокода ----------
 @dp.message(lambda message: message.text == "❌ Удалить промокод")
@@ -387,11 +389,11 @@ async def admin_delete_promo(message: types.Message):
     
     await message.answer("Введи код для удаления:")
 
-@dp.message(lambda message: message.from_user.id in ADMIN_IDS and len(message.text) < 20)
+@dp.message(lambda message: message.from_user.id in ADMIN_IDS and len(message.text) < 20 and not message.text.startswith('/') and not message.text.startswith('📋') and not message.text.startswith('➕') and not message.text.startswith('❌') and not message.text.startswith('🏠'))
 async def admin_delete_promo_execute(message: types.Message):
     code = message.text.strip().upper()
     deactivate_promo_code(code)
-    await message.answer(f"✅ Промокод {code} удалён")
+    await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
 
 # ---------- Купить анализы ----------
 @dp.message(lambda message: message.text == "💎 Купить анализы")
@@ -401,7 +403,8 @@ async def buy_analyses(message: types.Message):
         "• 1 анализ — 299 ₽\n"
         "• 5 анализов — 990 ₽\n"
         "• Подписка на месяц (30 анализов) — 1490 ₽\n\n"
-        "Для покупки напиши @support"
+        "Для покупки напиши @support",
+        reply_markup=main_menu
     )
 
 # ---------- Профиль ----------
@@ -424,13 +427,17 @@ async def profile(message: types.Message):
         f"👤 Твой профиль:\n"
         f"• Промо-анализы: {promo}/3\n"
         f"• Купленные анализы: {bought}\n"
-        f"• Подписка: {sub_text}"
+        f"• Подписка: {sub_text}",
+        reply_markup=main_menu
     )
 
 # ---------- Мои отчёты ----------
 @dp.message(lambda message: message.text == "📊 Мои отчёты")
 async def my_reports(message: types.Message):
-    await message.answer("📊 История анализов пока пуста. Скоро здесь появятся твои отчёты.")
+    await message.answer(
+        "📊 История анализов пока пуста. Скоро здесь появятся твои отчёты.",
+        reply_markup=main_menu
+    )
 
 # ---------- Помощь ----------
 @dp.message(lambda message: message.text == "❓ Помощь")
@@ -440,7 +447,8 @@ async def help_message(message: types.Message):
         "1. Нажми «Анализ объявления»\n"
         "2. Отправь ссылку на объявление с Avito.ru\n"
         "3. Получи полный разбор и улучшенный текст\n\n"
-        "Есть вопросы? Пиши https://t.me/EzyFrost"
+        "Есть вопросы? Пиши https://t.me/EzyFrost",
+        reply_markup=main_menu
     )
 
 # ---------- Возврат в главное меню ----------
@@ -450,6 +458,10 @@ async def back_to_main(message: types.Message):
 
 # ---------- Запуск ----------
 async def main():
+    # Принудительно сбрасываем вебхук (решает проблему конфликта)
+    await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Вебхук удалён")
+    
     # Инициализация БД
     init_db()
     

@@ -8,6 +8,7 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiohttp import web  # Добавлено для веб-сервера
 import os
 
 # Токен из переменных окружения
@@ -261,6 +262,21 @@ admin_menu = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+# ---------- Простой HTTP-сервер для Render Health Check ----------
+async def handle_health(request):
+    return web.Response(text="OK")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌐 Веб-сервер для health checks запущен на порту {port}")
 
 # ---------- Команда /start ----------
 @dp.message(Command("start"))
@@ -558,6 +574,9 @@ async def main():
     # Удаляем вебхук (достаточно одного раза)
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён")
+    
+    # Запускаем фоновый веб-сервер для Render Health Checks
+    asyncio.create_task(run_web_server())
     
     # Инициализация БД
     init_db()

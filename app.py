@@ -4,7 +4,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import os
 
 # Токен из переменных окружения
@@ -15,8 +15,8 @@ ADMIN_IDS = [867292164]  # ТВОЙ Telegram ID
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
-bot = Bot(token=TOKEN)
+# Инициализация бота (сессия будет создана позже)
+bot = None
 dp = Dispatcher()
 
 # ---------- База данных ----------
@@ -489,14 +489,38 @@ async def unknown_message(message: types.Message):
 
 # ---------- Запуск ----------
 async def main():
-    # Принудительно сбрасываем вебхук (решает проблему конфликта)
+    global bot
+    
+    # Проверяем наличие токена
+    if not TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN не задан!")
+        return
+    
+    # Создаём бота
+    bot = Bot(token=TOKEN)
+    
+    # Жёсткий сброс всех подключений
+    logger.info("Сбрасываю вебхук...")
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Вебхук удалён")
+    await asyncio.sleep(2)
+    
+    # Закрываем старую сессию и создаём новую
+    logger.info("Пересоздаю сессию...")
+    await bot.close()
+    await asyncio.sleep(1)
+    
+    # Создаём бота заново с новой сессией
+    bot = Bot(token=TOKEN)
+    
+    logger.info("Вебхук удалён, сессия пересоздана")
     
     # Инициализация БД
     init_db()
+    logger.info("База данных инициализирована")
     
-    logger.info("Бот запущен")
+    logger.info(f"✅ Бот запущен для @{bot.username}")
+    
+    # Запускаем polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

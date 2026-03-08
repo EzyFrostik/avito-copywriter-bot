@@ -5,6 +5,9 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 import os
 
 # Токен из переменных окружения
@@ -17,7 +20,15 @@ logger = logging.getLogger(__name__)
 
 # Инициализация бота и диспетчера
 bot = None
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# ---------- Состояния для FSM ----------
+class PromoForm(StatesGroup):
+    code = State()
+    analyses = State()
+    max_uses = State()
+    days = State()
 
 # ---------- База данных ----------
 def init_db():
@@ -372,18 +383,87 @@ async def admin_list_promos(message: types.Message):
     
     await message.answer(text, reply_markup=admin_menu)
 
+# ---------- Создание промокода (пошаговое) ----------
 @dp.message(lambda message: message.text == "➕ Создать промокод")
-async def admin_create_promo(message: types.Message):
+async def admin_create_promo_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     
-    await message.answer(
-        "Введи параметры промокода в формате:\n"
-        "`КОД КОЛИЧЕСТВО_АНАЛИЗОВ МАКС_ИСПОЛЬЗОВАНИЙ ДНЕЙ_ДЕЙСТВИЯ`\n\n"
-        "Пример: `PROMO10 3 5 30` — код PROMO10 на 3 анализа, 5 использований, 30 дней\n\n"
-        "Если дней = 0 — бессрочный"
-    )
+    await message.answer("🔤 Введи **название промокода** (например: PROMO10):")
+    await state.set_state(PromoForm.code)
 
+@dp.message(PromoForm.code)
+async def admin_create_promo_code(message: types.Message, state: FSMContext):
+    code = message.text.strip().upper()
+    if not code.isalnum():
+        await message.answer("❌ Код должен содержать только буквы и цифры. Попробуй ещё раз:")
+        return
+    
+    await state.update_data(code=code)
+    await message.answer("🔢 Введи **количество анализов**, которые даёт промокод (например: 3):")
+    await state.set_state(PromoForm.analyses)
+
+@dp.message(PromoForm.analyses)
+async def admin_create_promo_analyses(message: types.Message, state: FSMContext):
+    try:
+        analyses = int(message.text.strip())
+        if analyses <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи **положительное число**. Попробуй ещё раз:")
+        return
+    
+    await state.update_data(analyses=analyses)
+    await message.answer("🔢 Введи **максимальное количество использований** (например: 5):")
+    await state.set_state(PromoForm.max_uses)
+
+@dp.message(PromoForm.max_uses)
+async def admin_create_promo_max_uses(message: types.Message, state: FSMContext):
+    try:
+        max_uses = int(message.text.strip())
+        if max_uses <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи **положительное число**. Попробуй ещё раз:")
+        return
+    
+    await state.update_data(max_uses=max_uses)
+    await message.answer(
+        "📅 Введи **срок действия в днях** (0 — бессрочно, например: 30):"
+    )
+    await state.set_state(PromoForm.days)
+
+@dp.message(PromoForm.days)
+async def admin_create_promo_days(message: types.Message, state: FSMContext):
+    try:
+        days = int(message.text.strip())
+        if days < 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи **неотрицательное число** (0 или больше). Попробуй ещё раз:")
+        return
+    
+    data = await state.get_data()
+    
+    # Создаём промокод
+    create_promo_code(
+        code=data['code'],
+        analyses_count=data['analyses'],
+        max_uses=data['max_uses'],
+        expires_at_days=days if days > 0 else None,
+        admin_id=message.from_user.id
+    )
+    
+    await message.answer(
+        f"✅ Промокод **{data['code']}** создан!\n"
+        f"• {data['analyses']} анализов\n"
+        f"• максимум {data['max_uses']} использований\n"
+        f"• {'бессрочно' if days == 0 else f'{days} дней'}",
+        reply_markup=admin_menu
+    )
+    await state.clear()
+
+# ---------- Удаление промокода ----------
 @dp.message(lambda message: message.text == "❌ Удалить промокод")
 async def admin_delete_promo(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -391,9 +471,14 @@ async def admin_delete_promo(message: types.Message):
     
     await message.answer("Введи код для удаления:")
 
-@dp.message(lambda message: message.text == "🏠 Главное меню")
-async def back_to_main(message: types.Message):
-    await message.answer("Главное меню:", reply_markup=main_menu)
+@dp.message(lambda message: message.from_user.id in ADMIN_IDS and 
+            len(message.text) < 20 and 
+            message.text not in BUTTON_TEXTS and 
+            not message.text.startswith('/'))
+async def admin_delete_promo_execute(message: types.Message):
+    code = message.text.strip().upper()
+    deactivate_promo_code(code)
+    await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
 
 # ---------- Обработчик ссылок на Авито ----------
 @dp.message(lambda message: 'avito.ru' in message.text)
@@ -427,35 +512,6 @@ async def handle_url(message: types.Message):
         "Полноценный анализ будет добавлен в следующем обновлении.",
         reply_markup=main_menu
     )
-
-# ---------- Обработчик ввода промокода (только для админа при создании) ----------
-@dp.message(lambda message: message.from_user.id in ADMIN_IDS and 
-            len(message.text.split()) == 4 and 
-            message.text.split()[0].isalnum() and 
-            message.text.split()[1].isdigit() and 
-            message.text.split()[2].isdigit() and 
-            message.text.split()[3].isdigit())
-async def admin_create_promo_execute(message: types.Message):
-    try:
-        code, analyses, max_uses, days = message.text.split()
-        analyses = int(analyses)
-        max_uses = int(max_uses)
-        days = int(days) if days != '0' else None
-        
-        create_promo_code(code.upper(), analyses, max_uses, days, message.from_user.id)
-        await message.answer(f"✅ Промокод {code.upper()} создан!", reply_markup=admin_menu)
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}", reply_markup=admin_menu)
-
-# ---------- Обработчик ввода кода для удаления (только для админа) ----------
-@dp.message(lambda message: message.from_user.id in ADMIN_IDS and 
-            len(message.text) < 20 and 
-            message.text not in BUTTON_TEXTS and 
-            not message.text.startswith('/'))
-async def admin_delete_promo_execute(message: types.Message):
-    code = message.text.strip().upper()
-    deactivate_promo_code(code)
-    await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
 
 # ---------- Обработчик ввода промокода для обычных пользователей ----------
 @dp.message(lambda message: message.from_user.id not in ADMIN_IDS and 

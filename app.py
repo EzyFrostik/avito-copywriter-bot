@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import sqlite3
 from datetime import datetime, timedelta
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
@@ -10,11 +9,17 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler
+
+# ---------- SQLAlchemy для PostgreSQL ----------
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base, Mapped, mapped_column
+from sqlalchemy import select, delete, Integer, String, BigInteger, Text
 
 # Токен и URL для вебхука
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Обязательно добавить в Render
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+DATABASE_URL = os.environ.get("DATABASE_URL")  # строка подключения к PostgreSQL
 ADMIN_IDS = [867292164]
 
 logging.basicConfig(level=logging.INFO)
@@ -24,188 +29,194 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ---------- База данных с таймаутом ----------
-def get_db_connection():
-    """Возвращает соединение с БД с таймаутом 10 секунд"""
-    return sqlite3.connect('users.db', timeout=10.0)
+# ---------- Настройка PostgreSQL ----------
+# Преобразуем обычный URL в асинхронный (меняем postgresql:// на postgresql+asyncpg://)
+ASYNC_DB_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1) if DATABASE_URL else None
 
-def init_db():
-    conn = get_db_connection()
-    cur = conn.cursor()
+# Создаём движок и фабрику сессий
+engine = None
+async_session_maker = None
+
+if ASYNC_DB_URL:
+    engine = create_async_engine(ASYNC_DB_URL, echo=False, pool_size=10, max_overflow=20)
+    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    logger.info("✅ Настроен движок PostgreSQL")
+else:
+    logger.error("❌ DATABASE_URL не задан!")
+
+# Базовый класс для моделей
+Base = declarative_base()
+
+# Модель пользователя
+class User(Base):
+    __tablename__ = 'users'
     
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            promo_analyses INTEGER DEFAULT 0,
-            bought_analyses INTEGER DEFAULT 0,
-            subscription_end DATE,
-            created_at TEXT
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    promo_analyses: Mapped[int] = mapped_column(Integer, default=0)
+    bought_analyses: Mapped[int] = mapped_column(Integer, default=0)
+    subscription_end: Mapped[str] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+
+# Модель промокода
+class PromoCode(Base):
+    __tablename__ = 'promo_codes'
+    
+    code: Mapped[str] = mapped_column(String, primary_key=True)
+    analyses_count: Mapped[int] = mapped_column(Integer, default=3)
+    max_uses: Mapped[int] = mapped_column(Integer, default=1)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    expires_at: Mapped[str] = mapped_column(String, nullable=True)
+    created_by: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[str] = mapped_column(String)
+
+# Модель использований промокодов
+class PromoUse(Base):
+    __tablename__ = 'promo_uses'
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    used_at: Mapped[str] = mapped_column(String)
+
+# Модель анализов
+class Analysis(Base):
+    __tablename__ = 'analyses'
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger)
+    url: Mapped[str] = mapped_column(String)
+    report: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)
+
+# ---------- Инициализация БД ----------
+async def init_db():
+    if not engine:
+        logger.error("❌ Нет подключения к БД")
+        return
+    
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("✅ Таблицы PostgreSQL созданы/проверены")
+
+# ---------- Функции для работы с БД ----------
+async def get_user(user_id: int):
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        return result.scalar_one_or_none()
+
+async def create_user(user_id: int):
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            new_user = User(
+                user_id=user_id,
+                promo_analyses=0,
+                bought_analyses=0,
+                subscription_end=None,
+                created_at=datetime.now().isoformat()
+            )
+            session.add(new_user)
+            await session.commit()
+
+async def use_analysis(user_id: int):
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if not user:
+            return False, None
+        
+        if user.promo_analyses > 0:
+            user.promo_analyses -= 1
+            await session.commit()
+            return True, "promo"
+        
+        if user.bought_analyses > 0:
+            user.bought_analyses -= 1
+            await session.commit()
+            return True, "bought"
+        
+        return False, None
+
+async def add_promo_analyses(user_id: int, count: int):
+    async with async_session_maker() as session:
+        result = await session.execute(select(User).where(User.user_id == user_id))
+        user = result.scalar_one_or_none()
+        if user:
+            user.promo_analyses += count
+            await session.commit()
+
+async def check_promo_code(code: str, user_id: int):
+    async with async_session_maker() as session:
+        result = await session.execute(select(PromoCode).where(PromoCode.code == code))
+        promo = result.scalar_one_or_none()
+        
+        if not promo:
+            return False, "Код не найден"
+        
+        if promo.expires_at:
+            try:
+                if datetime.now().date() > datetime.fromisoformat(promo.expires_at).date():
+                    return False, "Срок действия кода истёк"
+            except:
+                pass
+        
+        if promo.used_count >= promo.max_uses:
+            return False, "Код уже использован максимальное количество раз"
+        
+        result = await session.execute(
+            select(PromoUse).where(PromoUse.code == code, PromoUse.user_id == user_id)
         )
-    ''')
-    
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS promo_codes (
-            code TEXT PRIMARY KEY,
-            analyses_count INTEGER DEFAULT 3,
-            max_uses INTEGER DEFAULT 1,
-            used_count INTEGER DEFAULT 0,
-            expires_at DATE,
-            created_by INTEGER,
-            created_at TEXT
+        if result.scalar_one_or_none():
+            return False, "Вы уже использовали этот код"
+        
+        return True, promo.analyses_count
+
+async def activate_promo_code(code: str, user_id: int):
+    async with async_session_maker() as session:
+        result = await session.execute(select(PromoCode).where(PromoCode.code == code))
+        promo = result.scalar_one_or_none()
+        
+        if promo:
+            promo.used_count += 1
+            new_use = PromoUse(
+                code=code,
+                user_id=user_id,
+                used_at=datetime.now().isoformat()
+            )
+            session.add(new_use)
+            await add_promo_analyses(user_id, promo.analyses_count)
+            await session.commit()
+
+async def create_promo_code(code: str, analyses_count: int, max_uses: int, expires_at_days: int, admin_id: int):
+    async with async_session_maker() as session:
+        expires_at = (datetime.now() + timedelta(days=expires_at_days)).date().isoformat() if expires_at_days > 0 else None
+        new_promo = PromoCode(
+            code=code.upper(),
+            analyses_count=analyses_count,
+            max_uses=max_uses,
+            used_count=0,
+            expires_at=expires_at,
+            created_by=admin_id,
+            created_at=datetime.now().isoformat()
         )
-    ''')
-    
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS promo_uses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code TEXT,
-            user_id INTEGER,
-            used_at TEXT
+        session.add(new_promo)
+        await session.commit()
+
+async def get_all_promo_codes():
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(PromoCode).order_by(PromoCode.created_at.desc())
         )
-    ''')
-    
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS analyses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            url TEXT,
-            report TEXT,
-            created_at TEXT
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+        codes = result.scalars().all()
+        return [(c.code, c.analyses_count, c.max_uses, c.used_count, c.expires_at) for c in codes]
 
-# ---------- Функции пользователей ----------
-def get_user(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    user = cur.fetchone()
-    conn.close()
-    return user
-
-def create_user(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('''
-        INSERT OR IGNORE INTO users (user_id, promo_analyses, bought_analyses, created_at)
-        VALUES (?, 0, 0, ?)
-    ''', (user_id, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def use_analysis(user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    cur.execute('SELECT promo_analyses FROM users WHERE user_id = ?', (user_id,))
-    promo = cur.fetchone()
-    if promo and promo[0] > 0:
-        cur.execute('UPDATE users SET promo_analyses = promo_analyses - 1 WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        return True, "promo"
-    
-    cur.execute('SELECT bought_analyses FROM users WHERE user_id = ?', (user_id,))
-    bought = cur.fetchone()
-    if bought and bought[0] > 0:
-        cur.execute('UPDATE users SET bought_analyses = bought_analyses - 1 WHERE user_id = ?', (user_id,))
-        conn.commit()
-        conn.close()
-        return True, "bought"
-    
-    conn.close()
-    return False, None
-
-def add_promo_analyses(user_id, count):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET promo_analyses = promo_analyses + ? WHERE user_id = ?', (count, user_id))
-    conn.commit()
-    conn.close()
-
-def check_promo_code(code, user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    cur.execute('''
-        SELECT analyses_count, max_uses, used_count, expires_at 
-        FROM promo_codes WHERE code = ?
-    ''', (code,))
-    promo = cur.fetchone()
-    
-    if not promo:
-        conn.close()
-        return False, "Код не найден"
-    
-    analyses_count, max_uses, used_count, expires_at = promo
-    
-    if expires_at and datetime.now().date() > datetime.fromisoformat(expires_at).date():
-        conn.close()
-        return False, "Срок действия кода истёк"
-    
-    if used_count >= max_uses:
-        conn.close()
-        return False, "Код уже использован максимальное количество раз"
-    
-    cur.execute('SELECT * FROM promo_uses WHERE code = ? AND user_id = ?', (code, user_id))
-    if cur.fetchone():
-        conn.close()
-        return False, "Вы уже использовали этот код"
-    
-    conn.close()
-    return True, analyses_count
-
-def activate_promo_code(code, user_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Получаем количество анализов
-    cur.execute('SELECT analyses_count FROM promo_codes WHERE code = ?', (code,))
-    analyses_count = cur.fetchone()[0]
-    
-    # Обновляем счётчик использований
-    cur.execute('UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?', (code,))
-    
-    # Записываем использование
-    cur.execute('''
-        INSERT INTO promo_uses (code, user_id, used_at)
-        VALUES (?, ?, ?)
-    ''', (code, user_id, datetime.now().isoformat()))
-    
-    # Начисляем анализы пользователю
-    add_promo_analyses(user_id, analyses_count)
-    
-    conn.commit()
-    conn.close()
-
-def create_promo_code(code, analyses_count, max_uses, expires_at_days, admin_id):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    expires_at = (datetime.now() + timedelta(days=expires_at_days)).date().isoformat() if expires_at_days else None
-    cur.execute('''
-        INSERT INTO promo_codes (code, analyses_count, max_uses, expires_at, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (code.upper(), analyses_count, max_uses, expires_at, admin_id, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def get_all_promo_codes():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT code, analyses_count, max_uses, used_count, expires_at FROM promo_codes ORDER BY created_at DESC')
-    codes = cur.fetchall()
-    conn.close()
-    return codes
-
-def deactivate_promo_code(code):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('DELETE FROM promo_codes WHERE code = ?', (code.upper(),))
-    conn.commit()
-    conn.close()
+async def deactivate_promo_code(code: str):
+    async with async_session_maker() as session:
+        await session.execute(delete(PromoCode).where(PromoCode.code == code.upper()))
+        await session.commit()
 
 # ---------- Кнопки ----------
 BUTTON_TEXTS = [
@@ -255,7 +266,7 @@ class DeletePromoForm(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    create_user(user_id)
+    await create_user(user_id)
     await message.answer(
         "👋 Привет! Я помогу проанализировать твоё объявление на Авито и сделать его лучше.\n\n"
         "Выбери действие:",
@@ -272,11 +283,12 @@ async def admin_panel(message: types.Message):
 @dp.message(lambda message: message.text == "🔍 Анализ объявления")
 async def analyze_start(message: types.Message):
     user_id = message.from_user.id
-    create_user(user_id)
-    user = get_user(user_id)
-    promo = user[1] if user else 0
-    bought = user[2] if user else 0
-    subscription = user[3] if user else None
+    await create_user(user_id)
+    
+    user = await get_user(user_id)
+    promo = user.promo_analyses if user else 0
+    bought = user.bought_analyses if user else 0
+    subscription = user.subscription_end if user else None
     
     if promo > 0 or bought > 0 or (subscription and datetime.now().date() <= datetime.fromisoformat(subscription).date()):
         await message.answer("🔗 Отправь мне ссылку на твоё объявление на Авито")
@@ -290,7 +302,6 @@ async def analyze_start(message: types.Message):
 
 @dp.message(lambda message: message.text == "🎫 Ввести промокод")
 async def promo_start(message: types.Message):
-    # Для всех пользователей, включая админов, просто запрашиваем код
     await message.answer("🎫 Введи промокод:")
 
 @dp.message(lambda message: message.text == "💎 Купить анализы")
@@ -307,14 +318,17 @@ async def buy_analyses(message: types.Message):
 @dp.message(lambda message: message.text == "👤 Мой профиль")
 async def profile(message: types.Message):
     user_id = message.from_user.id
-    user = get_user(user_id)
+    user = await get_user(user_id)
     if not user:
-        create_user(user_id)
-        user = get_user(user_id)
-    promo = user[1] if user else 0
-    bought = user[2] if user else 0
-    subscription = user[3] if user else None
+        await create_user(user_id)
+        user = await get_user(user_id)
+    
+    promo = user.promo_analyses if user else 0
+    bought = user.bought_analyses if user else 0
+    subscription = user.subscription_end if user else None
+    
     sub_text = f"до {subscription}" if subscription else "нет"
+    
     await message.answer(
         f"👤 Твой профиль:\n"
         f"• Промо-анализы: {promo}/3\n"
@@ -342,14 +356,17 @@ async def help_message(message: types.Message):
 async def admin_list_promos(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    codes = get_all_promo_codes()
+    
+    codes = await get_all_promo_codes()
     if not codes:
         await message.answer("📭 Промокодов пока нет", reply_markup=admin_menu)
         return
+    
     text = "📋 Список промокодов:\n\n"
     for code, analyses, max_uses, used, expires in codes:
         expires_str = expires if expires else "бессрочно"
         text += f"• {code}: {analyses} ан., {used}/{max_uses} исп., до {expires_str}\n"
+    
     await message.answer(text, reply_markup=admin_menu)
 
 # ---------- Создание промокода ----------
@@ -406,11 +423,11 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
         await message.answer("❌ Введи **неотрицательное число** (0 или больше). Попробуй ещё раз:")
         return
     data = await state.get_data()
-    create_promo_code(
+    await create_promo_code(
         code=data['code'],
         analyses_count=data['analyses'],
         max_uses=data['max_uses'],
-        expires_at_days=days if days > 0 else None,
+        expires_at_days=days if days > 0 else 0,
         admin_id=message.from_user.id
     )
     await message.answer(
@@ -422,7 +439,7 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# ---------- Удаление промокода (только для админа, через состояние) ----------
+# ---------- Удаление промокода ----------
 @dp.message(lambda message: message.text == "❌ Удалить промокод")
 async def admin_delete_promo_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -436,11 +453,11 @@ async def admin_delete_promo_execute(message: types.Message, state: FSMContext):
         await state.clear()
         return
     code = message.text.strip().upper()
-    deactivate_promo_code(code)
+    await deactivate_promo_code(code)
     await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
     await state.clear()
 
-# ---------- Активация промокода для всех пользователей ----------
+# ---------- Активация промокода ----------
 @dp.message(lambda message: len(message.text) < 20 and 
             message.text not in BUTTON_TEXTS and 
             not message.text.startswith('/'))
@@ -448,10 +465,10 @@ async def handle_promo(message: types.Message):
     user_id = message.from_user.id
     code = message.text.strip().upper()
     
-    valid, result = check_promo_code(code, user_id)
+    valid, result = await check_promo_code(code, user_id)
     
     if valid:
-        activate_promo_code(code, user_id)
+        await activate_promo_code(code, user_id)
         await message.answer(
             f"✅ Промокод активирован!\n"
             f"Тебе начислено {result} анализа(ов).\n\n"
@@ -461,13 +478,13 @@ async def handle_promo(message: types.Message):
     else:
         await message.answer(f"❌ {result}", reply_markup=main_menu)
 
-# ---------- Обработчик ссылок на Авито ----------
+# ---------- Обработчик ссылок ----------
 @dp.message(lambda message: 'avito.ru' in message.text)
 async def handle_url(message: types.Message):
     user_id = message.from_user.id
     url = message.text.strip()
     
-    result, _ = use_analysis(user_id)
+    result, _ = await use_analysis(user_id)
     if not result:
         await message.answer(
             "❌ У тебя нет доступных анализов.\n\n"
@@ -500,40 +517,27 @@ async def unknown_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- ЗАПУСК ТОЛЬКО ВЕБХУКА ----------
+# ---------- ЗАПУСК ----------
 async def on_startup():
-    """Устанавливает вебхук при старте"""
     webhook_url = f"{WEBHOOK_URL}/webhook"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)
     logger.info(f"✅ Вебхук установлен на {webhook_url}")
     
-    # Инициализация БД
-    init_db()
+    await init_db()
     
-    # Получаем информацию о боте
     bot_info = await bot.get_me()
-    logger.info(f"✅ Бот @{bot_info.username} запущен на вебхуках")
+    logger.info(f"✅ Бот @{bot_info.username} запущен на вебхуках с PostgreSQL")
 
 async def on_shutdown():
-    """Удаляет вебхук при остановке"""
     await bot.delete_webhook()
     logger.info("Вебхук удалён")
 
-# Создаём приложение aiohttp
 app = web.Application()
-
-# Настраиваем обработчик вебхуков
-webhook_requests_handler = SimpleRequestHandler(
-    dispatcher=dp,
-    bot=bot,
-)
+webhook_requests_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
 webhook_requests_handler.register(app, path="/webhook")
-
-# Регистрируем функции запуска/остановки
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
 
-# Запуск
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     web.run_app(app, host="0.0.0.0", port=port)

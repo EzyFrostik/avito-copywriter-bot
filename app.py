@@ -8,35 +8,40 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web  # Добавлено для веб-сервера
+from aiohttp import web
 import os
 
-# Токен из переменных окружения
+# Токен
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ADMIN_IDS = [867292164]  # ТВОЙ Telegram ID
+ADMIN_IDS = [867292164]
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
-bot = None
+bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ---------- Состояния для FSM ----------
-class PromoForm(StatesGroup):
-    code = State()
-    analyses = State()
-    max_uses = State()
-    days = State()
+# --- Веб-сервер для Render ---
+async def handle(request):
+    return web.Response(text="OK")
 
-# ---------- База данных ----------
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    app.router.add_get('/health', handle)
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"🌐 Веб-сервер для хелсчеков на {port}")
+
+# ---------- База данных (твоя без изменений) ----------
 def init_db():
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     
-    # Таблица пользователей
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -47,7 +52,6 @@ def init_db():
         )
     ''')
     
-    # Таблица промокодов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS promo_codes (
             code TEXT PRIMARY KEY,
@@ -60,7 +64,6 @@ def init_db():
         )
     ''')
     
-    # Таблица использований промокодов
     cur.execute('''
         CREATE TABLE IF NOT EXISTS promo_uses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -70,7 +73,6 @@ def init_db():
         )
     ''')
     
-    # Таблица анализов (история)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS analyses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +86,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ---------- Функции для работы с пользователями ----------
+# ---------- Функции пользователей (твои без изменений) ----------
 def get_user(user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
@@ -107,20 +109,16 @@ def use_analysis(user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     
-    # Сначала проверяем промо-анализы
     cur.execute('SELECT promo_analyses FROM users WHERE user_id = ?', (user_id,))
     promo = cur.fetchone()
-    
     if promo and promo[0] > 0:
         cur.execute('UPDATE users SET promo_analyses = promo_analyses - 1 WHERE user_id = ?', (user_id,))
         conn.commit()
         conn.close()
         return True, "promo"
     
-    # Потом купленные
     cur.execute('SELECT bought_analyses FROM users WHERE user_id = ?', (user_id,))
     bought = cur.fetchone()
-    
     if bought and bought[0] > 0:
         cur.execute('UPDATE users SET bought_analyses = bought_analyses - 1 WHERE user_id = ?', (user_id,))
         conn.commit()
@@ -137,12 +135,11 @@ def add_promo_analyses(user_id, count):
     conn.commit()
     conn.close()
 
-# ---------- Функции для промокодов ----------
+# ---------- Функции промокодов (твои без изменений) ----------
 def check_promo_code(code, user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     
-    # Проверяем, существует ли код
     cur.execute('''
         SELECT analyses_count, max_uses, used_count, expires_at 
         FROM promo_codes WHERE code = ?
@@ -155,17 +152,14 @@ def check_promo_code(code, user_id):
     
     analyses_count, max_uses, used_count, expires_at = promo
     
-    # Проверяем срок действия
     if expires_at and datetime.now().date() > datetime.fromisoformat(expires_at).date():
         conn.close()
         return False, "Срок действия кода истёк"
     
-    # Проверяем лимит использований
     if used_count >= max_uses:
         conn.close()
         return False, "Код уже использован максимальное количество раз"
     
-    # Проверяем, не использовал ли этот пользователь код
     cur.execute('SELECT * FROM promo_uses WHERE code = ? AND user_id = ?', (code, user_id))
     if cur.fetchone():
         conn.close()
@@ -178,37 +172,27 @@ def activate_promo_code(code, user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
     
-    # Получаем количество анализов
     cur.execute('SELECT analyses_count FROM promo_codes WHERE code = ?', (code,))
     analyses_count = cur.fetchone()[0]
     
-    # Обновляем счётчик использований
     cur.execute('UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?', (code,))
-    
-    # Записываем использование
     cur.execute('''
         INSERT INTO promo_uses (code, user_id, used_at)
         VALUES (?, ?, ?)
     ''', (code, user_id, datetime.now().isoformat()))
-    
-    # Начисляем анализы пользователю
     add_promo_analyses(user_id, analyses_count)
     
     conn.commit()
     conn.close()
 
-# ---------- Админ-функции ----------
 def create_promo_code(code, analyses_count, max_uses, expires_at_days, admin_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    
     expires_at = (datetime.now() + timedelta(days=expires_at_days)).date().isoformat() if expires_at_days else None
-    
     cur.execute('''
         INSERT INTO promo_codes (code, analyses_count, max_uses, expires_at, created_by, created_at)
         VALUES (?, ?, ?, ?, ?, ?)
     ''', (code.upper(), analyses_count, max_uses, expires_at, admin_id, datetime.now().isoformat()))
-    
     conn.commit()
     conn.close()
 
@@ -227,7 +211,7 @@ def deactivate_promo_code(code):
     conn.commit()
     conn.close()
 
-# ---------- Список всех текстов кнопок для фильтрации ----------
+# ---------- Кнопки ----------
 BUTTON_TEXTS = [
     "🔍 Анализ объявления",
     "📊 Мои отчёты",
@@ -241,7 +225,6 @@ BUTTON_TEXTS = [
     "🏠 Главное меню"
 ]
 
-# ---------- Клавиатуры ----------
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔍 Анализ объявления")],
@@ -252,7 +235,6 @@ main_menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Админ-клавиатура
 admin_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📋 Список промокодов")],
@@ -263,53 +245,35 @@ admin_menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ---------- Простой HTTP-сервер для Render Health Check ----------
-async def handle_health(request):
-    return web.Response(text="OK")
+# ---------- Состояния для FSM ----------
+class PromoForm(StatesGroup):
+    code = State()
+    analyses = State()
+    max_uses = State()
+    days = State()
 
-async def run_web_server():
-    app = web.Application()
-    app.router.add_get('/', handle_health)
-    app.router.add_get('/health', handle_health)
-    port = int(os.environ.get("PORT", 10000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"🌐 Веб-сервер для health checks запущен на порту {port}")
-
-# ---------- Команда /start ----------
+# ---------- Команды и кнопки (твои, без изменений) ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
     create_user(user_id)
-    
     await message.answer(
         "👋 Привет! Я помогу проанализировать твоё объявление на Авито и сделать его лучше.\n\n"
         "Выбери действие:",
         reply_markup=main_menu
     )
 
-# ---------- Админ-панель ----------
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("⛔ Доступ запрещён")
         return
-    
-    await message.answer(
-        "👨‍💻 Админ-панель\n"
-        "Управление промокодами:",
-        reply_markup=admin_menu
-    )
+    await message.answer("👨‍💻 Админ-панель\nУправление промокодами:", reply_markup=admin_menu)
 
-# ---------- Обработчики кнопок главного меню ----------
 @dp.message(lambda message: message.text == "🔍 Анализ объявления")
 async def analyze_start(message: types.Message):
     user_id = message.from_user.id
     create_user(user_id)
-    
-    # Проверяем наличие анализов
     user = get_user(user_id)
     promo = user[1] if user else 0
     bought = user[2] if user else 0
@@ -344,17 +308,13 @@ async def buy_analyses(message: types.Message):
 async def profile(message: types.Message):
     user_id = message.from_user.id
     user = get_user(user_id)
-    
     if not user:
         create_user(user_id)
         user = get_user(user_id)
-    
     promo = user[1] if user else 0
     bought = user[2] if user else 0
     subscription = user[3] if user else None
-    
     sub_text = f"до {subscription}" if subscription else "нет"
-    
     await message.answer(
         f"👤 Твой профиль:\n"
         f"• Промо-анализы: {promo}/3\n"
@@ -365,10 +325,7 @@ async def profile(message: types.Message):
 
 @dp.message(lambda message: message.text == "📊 Мои отчёты")
 async def my_reports(message: types.Message):
-    await message.answer(
-        "📊 История анализов пока пуста. Скоро здесь появятся твои отчёты.",
-        reply_markup=main_menu
-    )
+    await message.answer("📊 История анализов пока пуста. Скоро здесь появятся твои отчёты.", reply_markup=main_menu)
 
 @dp.message(lambda message: message.text == "❓ Помощь")
 async def help_message(message: types.Message):
@@ -381,22 +338,18 @@ async def help_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- Обработчики кнопок админ-меню ----------
 @dp.message(lambda message: message.text == "📋 Список промокодов")
 async def admin_list_promos(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    
     codes = get_all_promo_codes()
     if not codes:
         await message.answer("📭 Промокодов пока нет", reply_markup=admin_menu)
         return
-    
     text = "📋 Список промокодов:\n\n"
     for code, analyses, max_uses, used, expires in codes:
         expires_str = expires if expires else "бессрочно"
         text += f"• {code}: {analyses} ан., {used}/{max_uses} исп., до {expires_str}\n"
-    
     await message.answer(text, reply_markup=admin_menu)
 
 # ---------- Создание промокода (пошаговое) ----------
@@ -404,7 +357,6 @@ async def admin_list_promos(message: types.Message):
 async def admin_create_promo_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
-    
     await message.answer("🔤 Введи **название промокода** (например: PROMO10):")
     await state.set_state(PromoForm.code)
 
@@ -414,7 +366,6 @@ async def admin_create_promo_code(message: types.Message, state: FSMContext):
     if not code.isalnum():
         await message.answer("❌ Код должен содержать только буквы и цифры. Попробуй ещё раз:")
         return
-    
     await state.update_data(code=code)
     await message.answer("🔢 Введи **количество анализов**, которые даёт промокод (например: 3):")
     await state.set_state(PromoForm.analyses)
@@ -428,7 +379,6 @@ async def admin_create_promo_analyses(message: types.Message, state: FSMContext)
     except ValueError:
         await message.answer("❌ Введи **положительное число**. Попробуй ещё раз:")
         return
-    
     await state.update_data(analyses=analyses)
     await message.answer("🔢 Введи **максимальное количество использований** (например: 5):")
     await state.set_state(PromoForm.max_uses)
@@ -442,11 +392,8 @@ async def admin_create_promo_max_uses(message: types.Message, state: FSMContext)
     except ValueError:
         await message.answer("❌ Введи **положительное число**. Попробуй ещё раз:")
         return
-    
     await state.update_data(max_uses=max_uses)
-    await message.answer(
-        "📅 Введи **срок действия в днях** (0 — бессрочно, например: 30):"
-    )
+    await message.answer("📅 Введи **срок действия в днях** (0 — бессрочно, например: 30):")
     await state.set_state(PromoForm.days)
 
 @dp.message(PromoForm.days)
@@ -458,10 +405,7 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введи **неотрицательное число** (0 или больше). Попробуй ещё раз:")
         return
-    
     data = await state.get_data()
-    
-    # Создаём промокод
     create_promo_code(
         code=data['code'],
         analyses_count=data['analyses'],
@@ -469,7 +413,6 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
         expires_at_days=days if days > 0 else None,
         admin_id=message.from_user.id
     )
-    
     await message.answer(
         f"✅ Промокод **{data['code']}** создан!\n"
         f"• {data['analyses']} анализов\n"
@@ -479,30 +422,39 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# ---------- Удаление промокода ----------
 @dp.message(lambda message: message.text == "❌ Удалить промокод")
 async def admin_delete_promo(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    
     await message.answer("Введи код для удаления:")
 
-@dp.message(lambda message: message.from_user.id in ADMIN_IDS and 
-            len(message.text) < 20 and 
-            message.text not in BUTTON_TEXTS and 
-            not message.text.startswith('/'))
+@dp.message(lambda message: message.from_user.id in ADMIN_IDS and len(message.text) < 20 and message.text not in BUTTON_TEXTS and not message.text.startswith('/'))
 async def admin_delete_promo_execute(message: types.Message):
     code = message.text.strip().upper()
     deactivate_promo_code(code)
     await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
 
-# ---------- Обработчик ссылок на Авито ----------
+@dp.message(lambda message: message.from_user.id not in ADMIN_IDS and len(message.text) < 20 and message.text not in BUTTON_TEXTS and not message.text.startswith('/'))
+async def handle_promo(message: types.Message):
+    user_id = message.from_user.id
+    code = message.text.strip().upper()
+    valid, result = check_promo_code(code, user_id)
+    if valid:
+        activate_promo_code(code, user_id)
+        await message.answer(
+            f"✅ Промокод активирован!\n"
+            f"Тебе начислено {result} анализа(ов).\n\n"
+            f"Можешь начинать анализ 🔍",
+            reply_markup=main_menu
+        )
+    else:
+        await message.answer(f"❌ {result}", reply_markup=main_menu)
+
 @dp.message(lambda message: 'avito.ru' in message.text)
 async def handle_url(message: types.Message):
     user_id = message.from_user.id
     url = message.text.strip()
     
-    # Проверяем наличие анализов
     result, _ = use_analysis(user_id)
     if not result:
         await message.answer(
@@ -518,40 +470,13 @@ async def handle_url(message: types.Message):
         f"Начинаю анализ: {url}\n\n"
         f"⏳ Это займёт около минуты..."
     )
-    
-    # Здесь будет вызов нейросети
-    # Пока просто заглушка
     await asyncio.sleep(2)
-    
     await message.answer(
         "📊 Анализ завершён (тестовая версия)\n\n"
         "Полноценный анализ будет добавлен в следующем обновлении.",
         reply_markup=main_menu
     )
 
-# ---------- Обработчик ввода промокода для обычных пользователей ----------
-@dp.message(lambda message: message.from_user.id not in ADMIN_IDS and 
-            len(message.text) < 20 and 
-            message.text not in BUTTON_TEXTS and 
-            not message.text.startswith('/'))
-async def handle_promo(message: types.Message):
-    user_id = message.from_user.id
-    code = message.text.strip().upper()
-    
-    valid, result = check_promo_code(code, user_id)
-    
-    if valid:
-        activate_promo_code(code, user_id)
-        await message.answer(
-            f"✅ Промокод активирован!\n"
-            f"Тебе начислено {result} анализа(ов).\n\n"
-            f"Можешь начинать анализ 🔍",
-            reply_markup=main_menu
-        )
-    else:
-        await message.answer(f"❌ {result}", reply_markup=main_menu)
-
-# ---------- Обработчик всего остального (если вдруг что-то не распозналось) ----------
 @dp.message()
 async def unknown_message(message: types.Message):
     await message.answer(
@@ -559,34 +484,26 @@ async def unknown_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- Запуск ----------
+# ---------- ЗАПУСК ----------
 async def main():
-    global bot
+    logger.info("Запускаю сервер...")
     
-    # Проверяем наличие токена
-    if not TOKEN:
-        logger.error("❌ TELEGRAM_TOKEN не задан!")
-        return
-    
-    # Создаём бота
-    bot = Bot(token=TOKEN)
-    
-    # Удаляем вебхук (достаточно одного раза)
+    # Сначала удаляем вебхук (на всякий случай)
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Вебхук удалён")
     
-    # Запускаем фоновый веб-сервер для Render Health Checks
-    asyncio.create_task(run_web_server())
-    
-    # Инициализация БД
+    # Инициализируем базу
     init_db()
     logger.info("База данных инициализирована")
     
+    # Запускаем веб-сервер для Render в фоне
+    asyncio.create_task(run_web_server())
+    
     # Получаем информацию о боте
     bot_info = await bot.get_me()
-    logger.info(f"✅ Бот запущен для @{bot_info.username}")
+    logger.info(f"✅ Бот @{bot_info.username} готов")
     
-    # Запускаем polling
+    # Запускаем бота (polling)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

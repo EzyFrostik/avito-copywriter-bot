@@ -7,8 +7,8 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import os
 
-# Токен из переменных окружения
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+# Токен из переменных окружения (исправлено: TELEGRAM_TOKEN)
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_IDS = [867292164]  # ТВОЙ Telegram ID
 
 # Настройка логирования
@@ -493,7 +493,7 @@ async def main():
     
     # Проверяем наличие токена
     if not TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN не задан!")
+        logger.error("❌ TELEGRAM_TOKEN не задан!")
         return
     
     # Создаём бота

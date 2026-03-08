@@ -33,7 +33,7 @@ dp = Dispatcher(storage=storage)
 @dp.update()
 async def debug_all_updates(update: types.Update):
     logger.info(f"🔍 Получено обновление: {update.model_dump_json(indent=2)}")
-    # Не отвечаем, просто логируем
+    return True  # Пропускаем обновление дальше
 
 # ---------- Настройка PostgreSQL ----------
 # Преобразуем обычный URL в асинхронный (меняем postgresql:// на postgresql+asyncpg://)

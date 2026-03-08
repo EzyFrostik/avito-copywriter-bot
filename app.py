@@ -1,18 +1,19 @@
-import asyncio
+import os
 import logging
 import sqlite3
 from datetime import datetime, timedelta
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiohttp import web
-import os
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-# Токен
+# Токен и URL для вебхука
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # обязательно добавить в Render
 ADMIN_IDS = [867292164]
 
 logging.basicConfig(level=logging.INFO)
@@ -22,22 +23,7 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# --- Веб-сервер для Render ---
-async def handle(request):
-    return web.Response(text="OK")
-
-async def run_web_server():
-    app = web.Application()
-    app.router.add_get('/', handle)
-    app.router.add_get('/health', handle)
-    port = int(os.environ.get("PORT", 10000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"🌐 Веб-сервер для хелсчеков на {port}")
-
-# ---------- База данных (твоя без изменений) ----------
+# ---------- База данных (твоя, без изменений) ----------
 def init_db():
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
@@ -86,7 +72,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ---------- Функции пользователей (твои без изменений) ----------
+# ---------- Функции пользователей (твои, без изменений) ----------
 def get_user(user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
@@ -135,7 +121,6 @@ def add_promo_analyses(user_id, count):
     conn.commit()
     conn.close()
 
-# ---------- Функции промокодов (твои без изменений) ----------
 def check_promo_code(code, user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
@@ -352,7 +337,7 @@ async def admin_list_promos(message: types.Message):
         text += f"• {code}: {analyses} ан., {used}/{max_uses} исп., до {expires_str}\n"
     await message.answer(text, reply_markup=admin_menu)
 
-# ---------- Создание промокода (пошаговое) ----------
+# ---------- Создание промокода ----------
 @dp.message(lambda message: message.text == "➕ Создать промокод")
 async def admin_create_promo_start(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -484,27 +469,40 @@ async def unknown_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- ЗАПУСК ----------
-async def main():
-    logger.info("Запускаю сервер...")
+# ---------- ЗАПУСК ВЕБХУКА ----------
+async def on_startup():
+    """Устанавливает вебхук при старте"""
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    await bot.set_webhook(webhook_url, drop_pending_updates=True)
+    logger.info(f"Вебхук установлен на {webhook_url}")
     
-    # Сначала удаляем вебхук (на всякий случай)
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Вебхук удалён")
-    
-    # Инициализируем базу
+    # Инициализация БД
     init_db()
-    logger.info("База данных инициализирована")
-    
-    # Запускаем веб-сервер для Render в фоне
-    asyncio.create_task(run_web_server())
     
     # Получаем информацию о боте
     bot_info = await bot.get_me()
-    logger.info(f"✅ Бот @{bot_info.username} готов")
-    
-    # Запускаем бота (polling)
-    await dp.start_polling(bot)
+    logger.info(f"✅ Бот @{bot_info.username} запущен на вебхуках")
 
+async def on_shutdown():
+    """Удаляет вебхук при остановке"""
+    await bot.delete_webhook()
+    logger.info("Вебхук удалён")
+
+# Создаём приложение aiohttp
+app = web.Application()
+
+# Настраиваем обработчик вебхуков
+webhook_requests_handler = SimpleRequestHandler(
+    dispatcher=dp,
+    bot=bot,
+)
+webhook_requests_handler.register(app, path="/webhook")
+
+# Регистрируем функции запуска/остановки
+app.on_startup.append(lambda _: on_startup())
+app.on_shutdown.append(lambda _: on_shutdown())
+
+# Запуск
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.environ.get("PORT", 10000))
+    web.run_app(app, host="0.0.0.0", port=port)

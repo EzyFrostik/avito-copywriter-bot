@@ -98,7 +98,7 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
     logger.info("✅ Таблицы PostgreSQL созданы/проверены")
 
-# ---------- Функции для работы с БД ----------
+# ---------- Функции для работы с БД (исправленные) ----------
 async def get_user(user_id: int):
     async with async_session_maker() as session:
         result = await session.execute(select(User).where(User.user_id == user_id))
@@ -106,117 +106,175 @@ async def get_user(user_id: int):
 
 async def create_user(user_id: int):
     async with async_session_maker() as session:
-        result = await session.execute(select(User).where(User.user_id == user_id))
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            new_user = User(
-                user_id=user_id,
-                promo_analyses=0,
-                bought_analyses=0,
-                subscription_end=None,
-                created_at=datetime.now().isoformat()
-            )
-            session.add(new_user)
-            await session.commit()
+        try:
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                new_user = User(
+                    user_id=user_id,
+                    promo_analyses=0,
+                    bought_analyses=0,
+                    subscription_end=None,
+                    created_at=datetime.now().isoformat()
+                )
+                session.add(new_user)
+                await session.commit()
+                logger.info(f"✅ Создан пользователь {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания пользователя {user_id}: {e}")
+            await session.rollback()
 
 async def use_analysis(user_id: int):
     async with async_session_maker() as session:
-        result = await session.execute(select(User).where(User.user_id == user_id))
-        user = result.scalar_one_or_none()
-        
-        if not user:
+        try:
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                return False, None
+            
+            if user.promo_analyses > 0:
+                user.promo_analyses -= 1
+                await session.commit()
+                return True, "promo"
+            
+            if user.bought_analyses > 0:
+                user.bought_analyses -= 1
+                await session.commit()
+                return True, "bought"
+            
             return False, None
-        
-        if user.promo_analyses > 0:
-            user.promo_analyses -= 1
-            await session.commit()
-            return True, "promo"
-        
-        if user.bought_analyses > 0:
-            user.bought_analyses -= 1
-            await session.commit()
-            return True, "bought"
-        
-        return False, None
+        except Exception as e:
+            logger.error(f"❌ Ошибка use_analysis для {user_id}: {e}")
+            await session.rollback()
+            return False, None
 
 async def add_promo_analyses(user_id: int, count: int):
     async with async_session_maker() as session:
-        result = await session.execute(select(User).where(User.user_id == user_id))
-        user = result.scalar_one_or_none()
-        if user:
-            user.promo_analyses += count
-            await session.commit()
+        try:
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+            if user:
+                user.promo_analyses += count
+                await session.commit()
+                logger.info(f"✅ Пользователю {user_id} начислено {count} промо-анализов")
+        except Exception as e:
+            logger.error(f"❌ Ошибка add_promo_analyses для {user_id}: {e}")
+            await session.rollback()
 
 async def check_promo_code(code: str, user_id: int):
     async with async_session_maker() as session:
-        result = await session.execute(select(PromoCode).where(PromoCode.code == code))
-        promo = result.scalar_one_or_none()
-        
-        if not promo:
-            return False, "Код не найден"
-        
-        if promo.expires_at:
-            try:
-                if datetime.now().date() > datetime.fromisoformat(promo.expires_at).date():
-                    return False, "Срок действия кода истёк"
-            except:
-                pass
-        
-        if promo.used_count >= promo.max_uses:
-            return False, "Код уже использован максимальное количество раз"
-        
-        result = await session.execute(
-            select(PromoUse).where(PromoUse.code == code, PromoUse.user_id == user_id)
-        )
-        if result.scalar_one_or_none():
-            return False, "Вы уже использовали этот код"
-        
-        return True, promo.analyses_count
+        try:
+            result = await session.execute(select(PromoCode).where(PromoCode.code == code))
+            promo = result.scalar_one_or_none()
+            
+            if not promo:
+                return False, "Код не найден"
+            
+            if promo.expires_at:
+                try:
+                    if datetime.now().date() > datetime.fromisoformat(promo.expires_at).date():
+                        return False, "Срок действия кода истёк"
+                except:
+                    pass
+            
+            if promo.used_count >= promo.max_uses:
+                return False, "Код уже использован максимальное количество раз"
+            
+            result = await session.execute(
+                select(PromoUse).where(PromoUse.code == code, PromoUse.user_id == user_id)
+            )
+            if result.scalar_one_or_none():
+                return False, "Вы уже использовали этот код"
+            
+            return True, promo.analyses_count
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки промокода {code}: {e}")
+            return False, "Ошибка базы данных"
 
 async def activate_promo_code(code: str, user_id: int):
     async with async_session_maker() as session:
-        result = await session.execute(select(PromoCode).where(PromoCode.code == code))
-        promo = result.scalar_one_or_none()
-        
-        if promo:
+        try:
+            # Получаем промокод
+            result = await session.execute(select(PromoCode).where(PromoCode.code == code))
+            promo = result.scalar_one_or_none()
+            
+            if not promo:
+                return False
+            
+            # Обновляем счётчик использований
             promo.used_count += 1
+            
+            # Записываем использование
             new_use = PromoUse(
                 code=code,
                 user_id=user_id,
                 used_at=datetime.now().isoformat()
             )
             session.add(new_use)
-            await add_promo_analyses(user_id, promo.analyses_count)
+            
+            # Получаем пользователя
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+            
+            if user:
+                user.promo_analyses += promo.analyses_count
+            
             await session.commit()
+            logger.info(f"✅ Промокод {code} активирован пользователем {user_id}, начислено {promo.analyses_count} анализов")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка активации промокода {code}: {e}")
+            await session.rollback()
+            return False
 
 async def create_promo_code(code: str, analyses_count: int, max_uses: int, expires_at_days: int, admin_id: int):
     async with async_session_maker() as session:
-        expires_at = (datetime.now() + timedelta(days=expires_at_days)).date().isoformat() if expires_at_days > 0 else None
-        new_promo = PromoCode(
-            code=code.upper(),
-            analyses_count=analyses_count,
-            max_uses=max_uses,
-            used_count=0,
-            expires_at=expires_at,
-            created_by=admin_id,
-            created_at=datetime.now().isoformat()
-        )
-        session.add(new_promo)
-        await session.commit()
+        try:
+            expires_at = (datetime.now() + timedelta(days=expires_at_days)).date().isoformat() if expires_at_days > 0 else None
+            new_promo = PromoCode(
+                code=code.upper(),
+                analyses_count=analyses_count,
+                max_uses=max_uses,
+                used_count=0,
+                expires_at=expires_at,
+                created_by=admin_id,
+                created_at=datetime.now().isoformat()
+            )
+            session.add(new_promo)
+            await session.commit()
+            logger.info(f"✅ Промокод {code} создан: {analyses_count} ан., {max_uses} исп., до {expires_at}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания промокода {code}: {e}")
+            await session.rollback()
+            return False
 
 async def get_all_promo_codes():
     async with async_session_maker() as session:
-        result = await session.execute(
-            select(PromoCode).order_by(PromoCode.created_at.desc())
-        )
-        codes = result.scalars().all()
-        return [(c.code, c.analyses_count, c.max_uses, c.used_count, c.expires_at) for c in codes]
+        try:
+            result = await session.execute(
+                select(PromoCode).order_by(PromoCode.created_at.desc())
+            )
+            codes = result.scalars().all()
+            logger.info(f"✅ Загружено {len(codes)} промокодов из БД")
+            return [(c.code, c.analyses_count, c.max_uses, c.used_count, c.expires_at) for c in codes]
+        except Exception as e:
+            logger.error(f"❌ Ошибка загрузки промокодов: {e}")
+            return []
 
 async def deactivate_promo_code(code: str):
     async with async_session_maker() as session:
-        await session.execute(delete(PromoCode).where(PromoCode.code == code.upper()))
-        await session.commit()
+        try:
+            await session.execute(delete(PromoCode).where(PromoCode.code == code.upper()))
+            await session.commit()
+            logger.info(f"✅ Промокод {code} удалён")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Ошибка удаления промокода {code}: {e}")
+            await session.rollback()
+            return False
 
 # ---------- Кнопки ----------
 BUTTON_TEXTS = [
@@ -422,21 +480,29 @@ async def admin_create_promo_days(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введи **неотрицательное число** (0 или больше). Попробуй ещё раз:")
         return
+    
     data = await state.get_data()
-    await create_promo_code(
+    success = await create_promo_code(
         code=data['code'],
         analyses_count=data['analyses'],
         max_uses=data['max_uses'],
         expires_at_days=days if days > 0 else 0,
         admin_id=message.from_user.id
     )
-    await message.answer(
-        f"✅ Промокод **{data['code']}** создан!\n"
-        f"• {data['analyses']} анализов\n"
-        f"• максимум {data['max_uses']} использований\n"
-        f"• {'бессрочно' if days == 0 else f'{days} дней'}",
-        reply_markup=admin_menu
-    )
+    
+    if success:
+        await message.answer(
+            f"✅ Промокод **{data['code']}** создан!\n"
+            f"• {data['analyses']} анализов\n"
+            f"• максимум {data['max_uses']} использований\n"
+            f"• {'бессрочно' if days == 0 else f'{days} дней'}",
+            reply_markup=admin_menu
+        )
+    else:
+        await message.answer(
+            f"❌ Ошибка при создании промокода. Возможно, такой код уже существует.",
+            reply_markup=admin_menu
+        )
     await state.clear()
 
 # ---------- Удаление промокода ----------
@@ -453,8 +519,11 @@ async def admin_delete_promo_execute(message: types.Message, state: FSMContext):
         await state.clear()
         return
     code = message.text.strip().upper()
-    await deactivate_promo_code(code)
-    await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
+    success = await deactivate_promo_code(code)
+    if success:
+        await message.answer(f"✅ Промокод {code} удалён", reply_markup=admin_menu)
+    else:
+        await message.answer(f"❌ Ошибка при удалении промокода {code}", reply_markup=admin_menu)
     await state.clear()
 
 # ---------- Активация промокода ----------
@@ -468,13 +537,16 @@ async def handle_promo(message: types.Message):
     valid, result = await check_promo_code(code, user_id)
     
     if valid:
-        await activate_promo_code(code, user_id)
-        await message.answer(
-            f"✅ Промокод активирован!\n"
-            f"Тебе начислено {result} анализа(ов).\n\n"
-            f"Можешь начинать анализ 🔍",
-            reply_markup=main_menu
-        )
+        success = await activate_promo_code(code, user_id)
+        if success:
+            await message.answer(
+                f"✅ Промокод активирован!\n"
+                f"Тебе начислено {result} анализа(ов).\n\n"
+                f"Можешь начинать анализ 🔍",
+                reply_markup=main_menu
+            )
+        else:
+            await message.answer(f"❌ Ошибка при активации промокода", reply_markup=main_menu)
     else:
         await message.answer(f"❌ {result}", reply_markup=main_menu)
 
@@ -517,7 +589,7 @@ async def unknown_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- ЗАПУСК (исправленный) ----------
+# ---------- ЗАПУСК ----------
 async def on_startup(app):
     webhook_url = f"{WEBHOOK_URL}/webhook"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)

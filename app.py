@@ -13,7 +13,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 
 # Токен и URL для вебхука
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # обязательно добавить в Render
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Обязательно добавить в Render
 ADMIN_IDS = [867292164]
 
 logging.basicConfig(level=logging.INFO)
@@ -23,7 +23,7 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ---------- База данных (твоя, без изменений) ----------
+# ---------- База данных ----------
 def init_db():
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
@@ -72,7 +72,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ---------- Функции пользователей (твои, без изменений) ----------
+# ---------- Функции пользователей ----------
 def get_user(user_id):
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
@@ -237,7 +237,7 @@ class PromoForm(StatesGroup):
     max_uses = State()
     days = State()
 
-# ---------- Команды и кнопки (твои, без изменений) ----------
+# ---------- Команды и кнопки ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
@@ -469,12 +469,12 @@ async def unknown_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- ЗАПУСК ВЕБХУКА ----------
+# ---------- ЗАПУСК ТОЛЬКО ВЕБХУКА ----------
 async def on_startup():
     """Устанавливает вебхук при старте"""
     webhook_url = f"{WEBHOOK_URL}/webhook"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)
-    logger.info(f"Вебхук установлен на {webhook_url}")
+    logger.info(f"✅ Вебхук установлен на {webhook_url}")
     
     # Инициализация БД
     init_db()
@@ -499,8 +499,8 @@ webhook_requests_handler = SimpleRequestHandler(
 webhook_requests_handler.register(app, path="/webhook")
 
 # Регистрируем функции запуска/остановки
-app.on_startup.append(lambda _: on_startup())
-app.on_shutdown.append(lambda _: on_shutdown())
+app.on_startup.append(on_startup)
+app.on_shutdown.append(on_shutdown)
 
 # Запуск
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import os
 
-# Токен из переменных окружения (исправлено: TELEGRAM_TOKEN)
+# Токен из переменных окружения
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_IDS = [867292164]  # ТВОЙ Telegram ID
 
@@ -507,7 +507,9 @@ async def main():
     init_db()
     logger.info("База данных инициализирована")
     
-    logger.info(f"✅ Бот запущен для @{bot.username}")
+    # Получаем информацию о боте
+    bot_info = await bot.get_me()
+    logger.info(f"✅ Бот запущен для @{bot_info.username}")
     
     # Запускаем polling
     await dp.start_polling(bot)

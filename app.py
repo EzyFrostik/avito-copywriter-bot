@@ -517,8 +517,8 @@ async def unknown_message(message: types.Message):
         reply_markup=main_menu
     )
 
-# ---------- ЗАПУСК ----------
-async def on_startup():
+# ---------- ЗАПУСК (исправленный) ----------
+async def on_startup(app):
     webhook_url = f"{WEBHOOK_URL}/webhook"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)
     logger.info(f"✅ Вебхук установлен на {webhook_url}")
@@ -528,7 +528,7 @@ async def on_startup():
     bot_info = await bot.get_me()
     logger.info(f"✅ Бот @{bot_info.username} запущен на вебхуках с PostgreSQL")
 
-async def on_shutdown():
+async def on_shutdown(app):
     await bot.delete_webhook()
     logger.info("Вебхук удалён")
 

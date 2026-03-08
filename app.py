@@ -29,6 +29,12 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# ---------- ОТЛАДКА: показываем все входящие сообщения ----------
+@dp.message()
+async def debug_all_messages(message: types.Message):
+    logger.info(f"🔍 Получено сообщение: text='{message.text}', from={message.from_user.id}, chat={message.chat.id}")
+    # Не отвечаем, просто логируем
+
 # ---------- Настройка PostgreSQL ----------
 # Преобразуем обычный URL в асинхронный (меняем postgresql:// на postgresql+asyncpg://)
 ASYNC_DB_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1) if DATABASE_URL else None
@@ -581,13 +587,6 @@ async def handle_url(message: types.Message):
 @dp.message(lambda message: message.text == "🏠 Главное меню")
 async def back_to_main(message: types.Message):
     await message.answer("Главное меню:", reply_markup=main_menu)
-
-@dp.message()
-async def unknown_message(message: types.Message):
-    await message.answer(
-        "Я не понимаю эту команду. Используй кнопки меню или /start",
-        reply_markup=main_menu
-    )
 
 # ---------- ЗАПУСК ----------
 async def on_startup(app):
